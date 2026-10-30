@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -81,6 +83,10 @@ pub struct ServerArgs {
     /// Autosave interval in seconds (0 disables autosave)
     #[arg(long, default_value_t = 30)]
     pub autosave_sec: u64,
+
+    /// Snapshot heartbeat interval in milliseconds (guarantees periodic snapshot even if unchanged; 0 disables deduplication)
+    #[arg(long, default_value_t = 1000)]
+    pub snapshot_heartbeat_ms: u64,
 }
 
 /// Core server gateway and session scheduling coordinator.
@@ -90,6 +96,8 @@ pub struct TextCraftServer {
     pub admin_token: String,
     pub time_scale: f32,
     pub autosave_sec: u64,
+    pub snapshot_heartbeat_ms: u64,
+    last_snapshots: HashMap<PlayerId, (u64, Instant)>,
     player_tokens: HashMap<PlayerId, String>,
 }
 
@@ -101,14 +109,16 @@ impl TextCraftServer {
         let mut logic = SchemeLogic::new(args.scripts_dir, !args.no_watch_scripts, args.save_file)?;
         logic.init()?;
 
-        Self::start_with_config(
+        let mut server = Self::start_with_config(
             config,
             logic,
             args.admin_token,
             args.time_scale,
             args.autosave_sec,
         )
-        .await
+        .await?;
+        server.snapshot_heartbeat_ms = args.snapshot_heartbeat_ms;
+        Ok(server)
     }
 
     /// Starts the server with explicit configuration and prepared logic engine.
@@ -133,8 +143,16 @@ impl TextCraftServer {
             admin_token,
             time_scale,
             autosave_sec,
+            snapshot_heartbeat_ms: 1000,
+            last_snapshots: HashMap::new(),
             player_tokens: HashMap::new(),
         })
+    }
+
+    /// Sets the snapshot heartbeat interval in milliseconds (0 disables deduplication).
+    pub fn with_snapshot_heartbeat_ms(mut self, ms: u64) -> Self {
+        self.snapshot_heartbeat_ms = ms;
+        self
     }
 
     /// Returns the bound local socket address.
@@ -169,6 +187,7 @@ impl TextCraftServer {
                 game_server::SessionEvent::PlayerDisconnected { player_id, .. }
                 | game_server::SessionEvent::PlayerTerminated { player_id } => {
                     self.player_tokens.remove(&player_id);
+                    self.last_snapshots.remove(&player_id);
                     if let Err(e) = self.logic.on_player_leave(player_id) {
                         tracing::warn!(player_id, error = %e, "on_player_leave error");
                     }
@@ -224,10 +243,32 @@ impl TextCraftServer {
         }
 
         // 7. Render and broadcast snapshots for each online player
+        let now = Instant::now();
         for pid in self.handle.connected_players() {
             match self.logic.render_snapshot(pid) {
                 Ok(snapshot) => {
-                    self.handle.send_snapshot(pid, snapshot);
+                    if self.snapshot_heartbeat_ms == 0 {
+                        self.handle.send_snapshot(pid, snapshot);
+                    } else {
+                        let mut hasher = DefaultHasher::new();
+                        snapshot.screen.hash(&mut hasher);
+                        snapshot.hud.to_string().hash(&mut hasher);
+                        let current_hash = hasher.finish();
+
+                        let should_send = match self.last_snapshots.get(&pid) {
+                            None => true,
+                            Some(&(last_hash, last_sent)) => {
+                                current_hash != last_hash
+                                    || now.duration_since(last_sent)
+                                        >= Duration::from_millis(self.snapshot_heartbeat_ms)
+                            }
+                        };
+
+                        if should_send {
+                            self.last_snapshots.insert(pid, (current_hash, now));
+                            self.handle.send_snapshot(pid, snapshot);
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(player_id = pid, error = %e, "Failed to render snapshot");

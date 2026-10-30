@@ -44,6 +44,8 @@ fn test_1_cli_argument_parsing_and_config() {
         "my_save.json",
         "--autosave-sec",
         "45",
+        "--snapshot-heartbeat-ms",
+        "500",
     ])
     .expect("CLI args parsing should succeed");
 
@@ -55,6 +57,7 @@ fn test_1_cli_argument_parsing_and_config() {
     assert_eq!(args.admin_token, "my_super_token");
     assert_eq!(args.save_file, Some(PathBuf::from("my_save.json")));
     assert_eq!(args.autosave_sec, 45);
+    assert_eq!(args.snapshot_heartbeat_ms, 500);
 
     // 2. Default arguments verification
     let default_args =
@@ -66,6 +69,7 @@ fn test_1_cli_argument_parsing_and_config() {
     assert_eq!(default_args.admin_token, "admin");
     assert_eq!(default_args.autosave_sec, 30);
     assert!(default_args.save_file.is_none());
+    assert_eq!(default_args.snapshot_heartbeat_ms, 1000);
 
     // 3. ServerConfig construction from parsed CLI args
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse().unwrap();
