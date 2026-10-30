@@ -1,0 +1,102 @@
+name: Release Build & Publish
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: textcraft-linux-x86_64
+            use_cross: false
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: textcraft-macos-arm64
+            use_cross: false
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: textcraft-windows-x86_64
+            use_cross: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }} --bin server
+
+      - name: Package artifacts (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/server staging/
+          cp -r scripts staging/
+          cp README.md staging/
+          tar -czvf ${{ matrix.artifact_name }}.tar.gz -C staging .
+
+      - name: Package artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/server.exe staging/
+          cp -r scripts staging/
+          cp README.md staging/
+          7z a ${{ matrix.artifact_name }}.zip ./staging/*
+
+      - name: Upload artifact for release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            *.tar.gz
+            *.zip
+          retention-days: 1
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Display downloaded files
+        run: ls -lh dist/
+
+      - name: Create or update Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v3.0.0' }}
+          files: dist/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true

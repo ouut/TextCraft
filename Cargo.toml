@@ -1,0 +1,34 @@
+[package]
+name = "textcraft"
+version = "3.0.0"
+edition = "2021"
+description = "TextCraft 3.0: High performance multiplayer Hybrid UI terminal engine powered by Scheme and Rust"
+
+[lib]
+name = "textcraft"
+path = "src/lib.rs"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[dependencies]
+steel-core = "0.8.3"
+game_server = "0.2.0"
+game_script = "0.2.0"
+game_net = "0.2.0"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+rand = "0.8"
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

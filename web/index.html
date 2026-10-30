@@ -1,0 +1,1659 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TextCraft 3.0</title>
+  <style>
+    /* ==========================================================================
+       TextCraft 3.0 Modern Hybrid UI - Pure CSS (Zero Dependencies)
+       ========================================================================== */
+    :root {
+      /* Theme variables default (Cyberpunk) */
+      --theme-accent: #00f0ff;
+      --theme-accent-hover: #33f3ff;
+      --theme-accent-glow: rgba(0, 240, 255, 0.35);
+      --theme-accent-secondary: #ff007f;
+      --theme-border: rgba(0, 240, 255, 0.25);
+      --theme-border-subtle: rgba(255, 255, 255, 0.1);
+      --theme-card-bg: rgba(20, 25, 35, 0.75);
+      --theme-badge-bg: rgba(0, 240, 255, 0.12);
+      --theme-bg-gradient: radial-gradient(circle at 50% 50%, #0d111a 0%, #07090e 100%);
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --hp-percent: 100%;
+      --mp-percent: 100%;
+    }
+
+    body.theme-retro-terminal {
+      --theme-accent: #00ff66;
+      --theme-accent-hover: #33ff85;
+      --theme-accent-glow: rgba(0, 255, 102, 0.4);
+      --theme-accent-secondary: #ffb800;
+      --theme-border: rgba(0, 255, 102, 0.3);
+      --theme-border-subtle: rgba(0, 255, 102, 0.15);
+      --theme-card-bg: rgba(8, 24, 14, 0.82);
+      --theme-badge-bg: rgba(0, 255, 102, 0.12);
+      --theme-bg-gradient: radial-gradient(circle at 50% 50%, #06180b 0%, #020804 100%);
+      --text-main: #e6fffa;
+      --text-muted: #5eead4;
+    }
+
+    body.theme-classic-rpg {
+      --theme-accent: #f5a623;
+      --theme-accent-hover: #ffbe4d;
+      --theme-accent-glow: rgba(245, 166, 35, 0.4);
+      --theme-accent-secondary: #d93d3d;
+      --theme-border: rgba(245, 166, 35, 0.35);
+      --theme-border-subtle: rgba(255, 255, 255, 0.12);
+      --theme-card-bg: rgba(30, 24, 22, 0.85);
+      --theme-badge-bg: rgba(245, 166, 35, 0.15);
+      --theme-bg-gradient: radial-gradient(circle at 50% 50%, #1a1418 0%, #0a080c 100%);
+      --text-main: #fef08a;
+      --text-muted: #ca8a04;
+    }
+
+    body.theme-minimal {
+      --theme-accent: #cbd5e1;
+      --theme-accent-hover: #ffffff;
+      --theme-accent-glow: rgba(255, 255, 255, 0.15);
+      --theme-accent-secondary: #94a3b8;
+      --theme-border: rgba(255, 255, 255, 0.18);
+      --theme-border-subtle: rgba(255, 255, 255, 0.08);
+      --theme-card-bg: rgba(15, 20, 28, 0.85);
+      --theme-badge-bg: rgba(255, 255, 255, 0.08);
+      --theme-bg-gradient: radial-gradient(circle at 50% 50%, #0f172a 0%, #020617 100%);
+      --text-main: #f8fafc;
+      --text-muted: #64748b;
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--theme-bg-gradient);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* Container for centering screen and overlaying HUD */
+    #game-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    /* Core Viewport */
+    #screen-viewport {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    #screen {
+      white-space: pre;
+      overflow: hidden;
+      margin: 0;
+      padding: 0;
+      line-height: 1.1;
+      font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-variant-ligatures: none;
+      text-rendering: geometricPrecision;
+      display: block;
+      transform: translateZ(0);
+      will-change: contents;
+      color: #ffffff;
+      text-shadow: 0 0 2px rgba(0, 0, 0, 0.8);
+    }
+
+    /* Floating Surround HUD */
+    #hud-overlay {
+      position: absolute;
+      pointer-events: none;
+      inset: 0;
+      z-index: 10;
+      overflow: hidden;
+    }
+
+    /* Common Glassmorphism Card */
+    .hud-card {
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      background: var(--theme-card-bg);
+      border: 1px solid var(--theme-border-subtle);
+      border-radius: 8px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .hud-card:hover {
+      border-color: var(--theme-border);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55), 0 0 12px var(--theme-accent-glow);
+    }
+
+    /* Top Bar */
+    #top-bar {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      right: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      pointer-events: none;
+    }
+
+    .status-card {
+      pointer-events: auto;
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+
+    .player-identity {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .player-avatar {
+      font-size: 20px;
+      line-height: 1;
+      filter: drop-shadow(0 0 6px var(--theme-accent-glow));
+    }
+
+    .player-info-text {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .player-title {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: var(--text-main);
+    }
+
+    .stat-badges {
+      display: flex;
+      gap: 6px;
+    }
+
+    .badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: var(--theme-badge-bg);
+      border: 1px solid var(--theme-border);
+      color: var(--theme-accent);
+      white-space: nowrap;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    }
+
+    .badge-gold {
+      color: #ffd700;
+      border-color: rgba(255, 215, 0, 0.35);
+      background: rgba(255, 215, 0, 0.1);
+    }
+
+    /* HP & MP Bars */
+    .bars-container {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 170px;
+    }
+
+    .bar-row {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .bar-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      line-height: 1;
+      color: var(--text-muted);
+    }
+
+    .bar-meta span:last-child {
+      color: var(--text-main);
+    }
+
+    .bar-track {
+      width: 100%;
+      background: rgba(0, 0, 0, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .hp-track {
+      height: 12px;
+      border-radius: 6px;
+    }
+
+    #hp-bar {
+      background: linear-gradient(90deg, #ff4d4f, #ff7875);
+      width: var(--hp-percent, 100%);
+      height: 12px;
+      border-radius: 6px;
+      transition: width 0.15s ease-out;
+      box-shadow: 0 0 8px rgba(255, 77, 79, 0.5);
+    }
+
+    .mp-track {
+      height: 10px;
+      border-radius: 5px;
+    }
+
+    #mp-bar {
+      background: linear-gradient(90deg, #1890ff, #69c0ff);
+      width: var(--mp-percent, 100%);
+      height: 10px;
+      border-radius: 5px;
+      transition: width 0.15s ease-out;
+      box-shadow: 0 0 8px rgba(24, 144, 255, 0.5);
+    }
+
+    /* Meta stats (FPS, Ping, Connection, Themes) */
+    .meta-card {
+      pointer-events: auto;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .conn-status {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.25);
+    }
+
+    .conn-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #faad14;
+      display: inline-block;
+      box-shadow: 0 0 6px currentColor;
+    }
+
+    .conn-dot.connected {
+      background: #52c41a;
+      color: #52c41a;
+    }
+
+    .conn-dot.connecting {
+      background: #faad14;
+      color: #faad14;
+      animation: pulse 1s infinite alternate;
+    }
+
+    .conn-dot.disconnected {
+      background: #ff4d4f;
+      color: #ff4d4f;
+    }
+
+    @keyframes pulse {
+      0% { opacity: 0.4; }
+      100% { opacity: 1.0; }
+    }
+
+    .hud-btn {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--theme-border-subtle);
+      color: var(--text-main);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .hud-btn:hover {
+      background: var(--theme-badge-bg);
+      border-color: var(--theme-border);
+      color: var(--theme-accent);
+    }
+
+    .hud-btn:active {
+      transform: scale(0.96);
+    }
+
+    /* Right Side Panel: Inventory & Equipment */
+    #right-panel {
+      position: absolute;
+      top: 76px;
+      right: 16px;
+      width: 210px;
+      pointer-events: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: calc(100vh - 160px);
+      transition: transform 0.25s ease, opacity 0.25s ease;
+    }
+
+    #right-panel.collapsed {
+      transform: translateX(170px);
+      opacity: 0.6;
+    }
+
+    #right-panel.collapsed:hover {
+      opacity: 1;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--theme-border-subtle);
+      padding-bottom: 6px;
+    }
+
+    .panel-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      letter-spacing: 0.5px;
+    }
+
+    .panel-toggle-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
+
+    .panel-toggle-btn:hover {
+      color: var(--theme-accent);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    /* 4x4 Inventory Grid */
+    .inventory-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+    }
+
+    .inv-slot {
+      aspect-ratio: 1;
+      background: rgba(0, 0, 0, 0.45);
+      border: 1px solid var(--theme-border-subtle);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      cursor: pointer;
+      pointer-events: auto;
+      transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+      user-select: none;
+    }
+
+    .inv-slot:hover {
+      border-color: var(--theme-accent);
+      background: var(--theme-badge-bg);
+      box-shadow: 0 0 10px var(--theme-accent-glow);
+      transform: translateY(-1px);
+    }
+
+    .inv-slot:active {
+      transform: scale(0.95);
+    }
+
+    .inv-slot.empty {
+      cursor: default;
+      opacity: 0.5;
+      border-style: dashed;
+    }
+
+    .inv-slot.empty:hover {
+      border-color: var(--theme-border-subtle);
+      background: rgba(0, 0, 0, 0.45);
+      box-shadow: none;
+      transform: none;
+    }
+
+    .inv-slot .slot-icon {
+      font-size: 20px;
+      line-height: 1;
+      pointer-events: none;
+    }
+
+    .inv-slot .slot-count {
+      position: absolute;
+      bottom: 2px;
+      right: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      color: #ffffff;
+      text-shadow: 0 1px 2px #000000, 0 0 4px #000000;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      pointer-events: none;
+    }
+
+    .slot-key-hint {
+      position: absolute;
+      top: 1px;
+      left: 3px;
+      font-size: 8px;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+      opacity: 0.7;
+      pointer-events: none;
+    }
+
+    /* Bottom-Left Panel: Combat & Chat Log */
+    #bottom-left-panel {
+      position: absolute;
+      left: 16px;
+      bottom: 68px;
+      width: 380px;
+      max-width: calc(100vw - 32px);
+      max-height: 190px;
+      pointer-events: auto;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .log-container {
+      overflow-y: auto;
+      max-height: 140px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      padding-right: 4px;
+      font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 12px;
+      line-height: 1.35;
+      scrollbar-width: thin;
+      scrollbar-color: var(--theme-border) transparent;
+    }
+
+    .log-container::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .log-container::-webkit-scrollbar-thumb {
+      background: var(--theme-border);
+      border-radius: 2px;
+    }
+
+    .log-line {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      word-break: break-all;
+    }
+
+    .log-tag {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 4px;
+      border-radius: 3px;
+      line-height: 1.1;
+      white-space: nowrap;
+      text-transform: uppercase;
+    }
+
+    .log-tag-combat {
+      background: rgba(255, 77, 79, 0.2);
+      color: #ff7875;
+      border: 1px solid rgba(255, 77, 79, 0.35);
+    }
+
+    .log-tag-system {
+      background: rgba(24, 144, 255, 0.2);
+      color: #69c0ff;
+      border: 1px solid rgba(24, 144, 255, 0.35);
+    }
+
+    .log-tag-chat {
+      background: rgba(82, 196, 26, 0.2);
+      color: #95de64;
+      border: 1px solid rgba(82, 196, 26, 0.35);
+    }
+
+    .log-tag-error {
+      background: rgba(250, 173, 20, 0.2);
+      color: #ffc069;
+      border: 1px solid rgba(250, 173, 20, 0.35);
+    }
+
+    .log-text {
+      color: var(--text-main);
+    }
+
+    /* Bottom Panel: Command / Chat Input */
+    #bottom-panel {
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      bottom: 14px;
+      display: flex;
+      justify-content: center;
+      pointer-events: none;
+    }
+
+    .cmd-wrapper {
+      pointer-events: auto;
+      width: min(640px, 100%);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 12px;
+      border-radius: 24px;
+    }
+
+    .cmd-prefix {
+      color: var(--theme-accent);
+      font-weight: 700;
+      font-size: 16px;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      line-height: 1;
+    }
+
+    #cmd-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text-main);
+      font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 13px;
+      padding: 6px 0;
+    }
+
+    #cmd-input::placeholder {
+      color: var(--text-muted);
+      opacity: 0.75;
+      font-size: 12px;
+    }
+
+    .cmd-send-btn {
+      background: var(--theme-badge-bg);
+      border: 1px solid var(--theme-border);
+      color: var(--theme-accent);
+      border-radius: 14px;
+      padding: 4px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .cmd-send-btn:hover {
+      background: var(--theme-accent);
+      color: #07090e;
+      box-shadow: 0 0 10px var(--theme-accent-glow);
+    }
+
+    /* Dialog Modal Overlay */
+    #dialog-modal {
+      position: absolute;
+      top: 15%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(480px, 90vw);
+      pointer-events: auto;
+      padding: 16px;
+      z-index: 50;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      transition: all 0.2s ease-out;
+    }
+
+    #dialog-modal.hidden {
+      display: none;
+    }
+
+    .dialog-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--theme-border-subtle);
+      padding-bottom: 8px;
+    }
+
+    .dialog-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--theme-accent);
+    }
+
+    .dialog-close {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 16px;
+      padding: 2px 6px;
+    }
+
+    .dialog-close:hover {
+      color: #ff4d4f;
+    }
+
+    .dialog-content {
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-main);
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .dialog-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .dialog-btn {
+      background: var(--theme-badge-bg);
+      border: 1px solid var(--theme-border);
+      color: var(--text-main);
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .dialog-btn:hover {
+      background: var(--theme-accent);
+      color: #07090e;
+      box-shadow: 0 0 10px var(--theme-accent-glow);
+    }
+
+    /* Keybindings Help Modal */
+    #help-modal {
+      position: absolute;
+      top: 20%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(440px, 92vw);
+      pointer-events: auto;
+      padding: 18px;
+      z-index: 60;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    #help-modal.hidden {
+      display: none;
+    }
+
+    .help-grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 8px 16px;
+      font-size: 12px;
+    }
+
+    .help-key {
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-weight: 700;
+      color: var(--theme-accent);
+      background: rgba(0, 0, 0, 0.4);
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--theme-border-subtle);
+      text-align: center;
+    }
+
+    .help-desc {
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+    }
+
+    /* Responsive adjustments */
+    @media (max-width: 768px) {
+      #top-bar {
+        top: 8px;
+        left: 8px;
+        right: 8px;
+        gap: 8px;
+      }
+      .status-card {
+        padding: 6px 10px;
+        gap: 10px;
+      }
+      .bars-container {
+        min-width: 120px;
+      }
+      #right-panel {
+        top: 64px;
+        right: 8px;
+        width: 170px;
+      }
+      #bottom-left-panel {
+        left: 8px;
+        bottom: 58px;
+        width: calc(100vw - 16px);
+        max-height: 130px;
+      }
+      #bottom-panel {
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+      }
+    }
+  </style>
+</head>
+<body class="theme-cyberpunk">
+  <div id="game-container">
+    <!-- Core Viewport -->
+    <main id="screen-viewport">
+      <pre id="screen"></pre>
+    </main>
+
+    <!-- Floating Surround HUD -->
+    <div id="hud-overlay">
+      <!-- Top Bar -->
+      <header id="top-bar">
+        <!-- Player Status Card with Glassmorphism -->
+        <div class="hud-card status-card" id="status-card">
+          <div class="player-identity">
+            <div class="player-avatar" id="player-avatar">🧙</div>
+            <div class="player-info-text">
+              <span class="player-title" id="player-title">冒险者</span>
+              <div class="stat-badges">
+                <span class="badge" id="badge-level">Lv.1</span>
+                <span class="badge badge-gold" id="badge-gold">🪙 0</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Dynamic HP / MP Bars -->
+          <div class="bars-container">
+            <div class="bar-row">
+              <div class="bar-meta">
+                <span>HP</span>
+                <span id="hp-text">100/100</span>
+              </div>
+              <div class="bar-track hp-track">
+                <div id="hp-bar"></div>
+              </div>
+            </div>
+            <div class="bar-row">
+              <div class="bar-meta">
+                <span>MP</span>
+                <span id="mp-text">50/50</span>
+              </div>
+              <div class="bar-track mp-track">
+                <div id="mp-bar"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Meta Card (FPS, Connection, Theme, Help) -->
+        <div class="hud-card meta-card">
+          <span class="badge" id="fps-badge"><span id="fps-val">60</span> FPS</span>
+          <div class="conn-status" id="conn-btn" title="点击重新连接">
+            <span class="conn-dot connecting" id="conn-dot"></span>
+            <span id="conn-text">连接中...</span>
+          </div>
+          <button class="hud-btn" id="theme-btn" title="切换视觉主题">🎨 <span id="theme-name">赛博</span></button>
+          <button class="hud-btn" id="help-btn" title="查看键位帮助">⌨️ 帮助</button>
+        </div>
+      </header>
+
+      <!-- Right Side Panel: Backpack / Inventory Grid -->
+      <aside class="hud-card" id="right-panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <span>🎒 物品背包</span>
+            <span class="badge" id="inv-count-badge">0/16</span>
+          </div>
+          <button class="panel-toggle-btn" id="inv-toggle-btn" title="折叠/展开背包">◀</button>
+        </div>
+        <div class="inventory-grid" id="inventory-grid">
+          <!-- 16 slots generated dynamically -->
+        </div>
+      </aside>
+
+      <!-- Bottom-Left Panel: Combat & Chat Log -->
+      <section class="hud-card" id="bottom-left-panel">
+        <div class="panel-header">
+          <div class="panel-title">📜 战斗与事件日志</div>
+          <button class="panel-toggle-btn" id="clear-log-btn" title="清空日志">✕</button>
+        </div>
+        <div class="log-container" id="log-container">
+          <!-- Log lines inserted here -->
+        </div>
+      </section>
+
+      <!-- Bottom Panel: Command / Chat Input -->
+      <footer id="bottom-panel">
+        <div class="hud-card cmd-wrapper">
+          <span class="cmd-prefix">:</span>
+          <input
+            type="text"
+            id="cmd-input"
+            placeholder="按 : 或点击输入指令... (例如 (help), (say &quot;hi&quot;))"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button class="cmd-send-btn" id="cmd-send-btn">发送</button>
+        </div>
+      </footer>
+
+      <!-- Floating Dialog Modal -->
+      <div class="hud-card dialog-modal hidden" id="dialog-modal">
+        <div class="dialog-header">
+          <span class="dialog-title" id="dialog-title">提示</span>
+          <button class="dialog-close" id="dialog-close-btn">✕</button>
+        </div>
+        <div class="dialog-content" id="dialog-body">...</div>
+        <div class="dialog-actions" id="dialog-actions"></div>
+      </div>
+
+      <!-- Help Keybindings Modal -->
+      <div class="hud-card help-modal hidden" id="help-modal">
+        <div class="dialog-header">
+          <span class="dialog-title">🎮 游戏操作指南</span>
+          <button class="dialog-close" id="help-close-btn">✕</button>
+        </div>
+        <div class="help-grid">
+          <span class="help-key">W / A / S / D</span>
+          <span class="help-desc">角色上、左、下、右移动</span>
+          <span class="help-key">↑ / ← / ↓ / →</span>
+          <span class="help-desc">方向键同等移动控制</span>
+          <span class="help-key">Space</span>
+          <span class="help-desc">互动、确认、攻击行动</span>
+          <span class="help-key">: (冒号)</span>
+          <span class="help-desc">呼出底部控制台指令输入框</span>
+          <span class="help-key">Enter</span>
+          <span class="help-desc">发送指令并自动恢复行走焦点</span>
+          <span class="help-key">Escape</span>
+          <span class="help-desc">取消输入或关闭弹出窗口</span>
+          <span class="help-key">鼠标点击背包</span>
+          <span class="help-desc">使用槽位物品 (焦点永不抢占)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /* ==========================================================================
+       TextCraft 3.0 Client Core Engine
+       ========================================================================== */
+    (function () {
+      'use strict';
+
+      // State
+      let currentCols = 80;
+      let currentRows = 24;
+      let ws = null;
+      let reconnectTimer = null;
+      let reconnectAttempts = 0;
+      const MAX_RECONNECT_DELAY = 4000;
+
+      // FPS tracking
+      let frameCount = 0;
+      let lastFpsTime = performance.now();
+
+      // Command history
+      const cmdHistory = [];
+      let cmdHistoryIndex = -1;
+
+      // Cache DOM elements
+      const screenEl = document.getElementById('screen');
+      const statusCardEl = document.getElementById('status-card');
+      const hpBarEl = document.getElementById('hp-bar');
+      const hpTextEl = document.getElementById('hp-text');
+      const mpBarEl = document.getElementById('mp-bar');
+      const mpTextEl = document.getElementById('mp-text');
+      const badgeLevelEl = document.getElementById('badge-level');
+      const badgeGoldEl = document.getElementById('badge-gold');
+      const playerTitleEl = document.getElementById('player-title');
+      const fpsValEl = document.getElementById('fps-val');
+      const connDotEl = document.getElementById('conn-dot');
+      const connTextEl = document.getElementById('conn-text');
+      const connBtnEl = document.getElementById('conn-btn');
+      const themeBtnEl = document.getElementById('theme-btn');
+      const themeNameEl = document.getElementById('theme-name');
+      const helpBtnEl = document.getElementById('help-btn');
+      const helpModalEl = document.getElementById('help-modal');
+      const helpCloseBtnEl = document.getElementById('help-close-btn');
+      const rightPanelEl = document.getElementById('right-panel');
+      const invToggleBtnEl = document.getElementById('inv-toggle-btn');
+      const inventoryGridEl = document.getElementById('inventory-grid');
+      const invCountBadgeEl = document.getElementById('inv-count-badge');
+      const logContainerEl = document.getElementById('log-container');
+      const clearLogBtnEl = document.getElementById('clear-log-btn');
+      const cmdInputEl = document.getElementById('cmd-input');
+      const cmdSendBtnEl = document.getElementById('cmd-send-btn');
+      const dialogModalEl = document.getElementById('dialog-modal');
+      const dialogTitleEl = document.getElementById('dialog-title');
+      const dialogBodyEl = document.getElementById('dialog-body');
+      const dialogActionsEl = document.getElementById('dialog-actions');
+      const dialogCloseBtnEl = document.getElementById('dialog-close-btn');
+
+      /* ==========================================================================
+         1. Dynamic Font-Size Scaler
+         ========================================================================== */
+      function updateScreenFontSize(cols, rows) {
+        cols = cols || currentCols || 80;
+        rows = rows || currentRows || 24;
+        currentCols = cols;
+        currentRows = rows;
+        if (!screenEl) return;
+        // Fit within available viewport height and width
+        const fontSize = Math.min((window.innerWidth * 0.95) / (cols * 0.62), (window.innerHeight * 0.90) / rows);
+        screenEl.style.fontSize = `${Math.floor(fontSize)}px`;
+      }
+
+      window.addEventListener('resize', () => {
+        updateScreenFontSize(currentCols, currentRows);
+      });
+
+      /* ==========================================================================
+         2. Micro-ANSI Streaming Parser
+         ========================================================================== */
+      const STANDARD_COLORS = [
+        // Normal 0-7
+        '#000000', '#cd3131', '#0dbc79', '#e5e510', '#2472c8', '#bc3fbc', '#11a8cd', '#e5e5e5',
+        // Bright 8-15
+        '#666666', '#f14c4c', '#23d18b', '#f5f543', '#3b8eea', '#d670d6', '#29b8db', '#ffffff'
+      ];
+
+      function get256Color(n) {
+        if (n < 16) return STANDARD_COLORS[n];
+        if (n >= 232) {
+          const v = 8 + (n - 232) * 10;
+          return `rgb(${v},${v},${v})`;
+        }
+        n -= 16;
+        const b = n % 6;
+        const g = Math.floor(n / 6) % 6;
+        const r = Math.floor(n / 36);
+        const toVal = (x) => (x === 0 ? 0 : 55 + x * 40);
+        return `rgb(${toVal(r)},${toVal(g)},${toVal(b)})`;
+      }
+
+      function escapeHtml(str) {
+        return str
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+
+      function parseAnsi(text) {
+        if (!text) return '';
+        const regex = /\x1b\[([?0-9;:]*)([A-Za-z])/g;
+        let html = '';
+        let lastIndex = 0;
+        let fg = null;
+        let bg = null;
+        let bold = false;
+        let italic = false;
+        let underline = false;
+        let spanOpen = false;
+
+        function updateSpan() {
+          if (spanOpen) {
+            html += '</span>';
+            spanOpen = false;
+          }
+          const styles = [];
+          if (fg) styles.push('color:' + fg);
+          if (bg) styles.push('background:' + bg);
+          if (bold) styles.push('font-weight:bold');
+          if (italic) styles.push('font-style:italic');
+          if (underline) styles.push('text-decoration:underline');
+          if (styles.length > 0) {
+            html += `<span style="${styles.join(';')}">`;
+            spanOpen = true;
+          }
+        }
+
+        let match;
+        while ((match = regex.exec(text)) !== null) {
+          const textChunk = text.slice(lastIndex, match.index);
+          if (textChunk.length > 0) {
+            html += escapeHtml(textChunk);
+          }
+          lastIndex = match.index + match[0].length;
+
+          const cmd = match[2];
+          if (cmd === 'm') {
+            const rawParams = match[1];
+            const params = rawParams === '' ? [0] : rawParams.replace(/:/g, ';').split(';').map(s => s === '' ? 0 : Number(s));
+            let i = 0;
+            while (i < params.length) {
+              const code = params[i];
+              if (code === 0) {
+                fg = null; bg = null; bold = false; italic = false; underline = false;
+              } else if (code === 1) {
+                bold = true;
+              } else if (code === 3) {
+                italic = true;
+              } else if (code === 4) {
+                underline = true;
+              } else if (code === 22) {
+                bold = false;
+              } else if (code === 23) {
+                italic = false;
+              } else if (code === 24) {
+                underline = false;
+              } else if (code >= 30 && code <= 37) {
+                fg = STANDARD_COLORS[code - 30];
+              } else if (code === 39) {
+                fg = null;
+              } else if (code >= 40 && code <= 47) {
+                bg = STANDARD_COLORS[code - 40];
+              } else if (code === 49) {
+                bg = null;
+              } else if (code >= 90 && code <= 97) {
+                fg = STANDARD_COLORS[code - 90 + 8];
+              } else if (code >= 100 && code <= 107) {
+                bg = STANDARD_COLORS[code - 100 + 8];
+              } else if (code === 38) {
+                if (params[i + 1] === 5 && i + 2 < params.length) {
+                  fg = get256Color(params[i + 2]);
+                  i += 2;
+                } else if (params[i + 1] === 2 && i + 4 < params.length) {
+                  fg = `rgb(${params[i + 2]},${params[i + 3]},${params[i + 4]})`;
+                  i += 4;
+                }
+              } else if (code === 48) {
+                if (params[i + 1] === 5 && i + 2 < params.length) {
+                  bg = get256Color(params[i + 2]);
+                  i += 2;
+                } else if (params[i + 1] === 2 && i + 4 < params.length) {
+                  bg = `rgb(${params[i + 2]},${params[i + 3]},${params[i + 4]})`;
+                  i += 4;
+                }
+              }
+              i++;
+            }
+            updateSpan();
+          }
+        }
+
+        const textChunk = text.slice(lastIndex);
+        if (textChunk.length > 0) {
+          html += escapeHtml(textChunk);
+        }
+        if (spanOpen) {
+          html += '</span>';
+        }
+        return html;
+      }
+
+      /* ==========================================================================
+         3. HUD Rendering & State Synchronization
+         ========================================================================== */
+      let lastInventoryJson = '';
+      let lastLogsJson = '';
+
+      function updateHUD(hud) {
+        if (!hud || typeof hud !== 'object') return;
+
+        // Theme
+        if (hud.theme) {
+          setTheme(hud.theme);
+        }
+
+        // HP Bar
+        if (hud.hp !== undefined) {
+          const hp = Number(hud.hp);
+          const maxHp = Number(hud.max_hp !== undefined ? hud.max_hp : 100);
+          const hpPercent = maxHp > 0 ? Math.min(100, Math.max(0, (hp / maxHp) * 100)) : 0;
+          statusCardEl.style.setProperty('--hp-percent', `${hpPercent}%`);
+          hpTextEl.textContent = `${hp}/${maxHp}`;
+        }
+
+        // MP Bar
+        if (hud.mp !== undefined) {
+          const mp = Number(hud.mp);
+          const maxMp = Number(hud.max_mp !== undefined ? hud.max_mp : 50);
+          const mpPercent = maxMp > 0 ? Math.min(100, Math.max(0, (mp / maxMp) * 100)) : 0;
+          statusCardEl.style.setProperty('--mp-percent', `${mpPercent}%`);
+          mpTextEl.textContent = `${mp}/${maxMp}`;
+        }
+
+        // Level & Gold
+        if (hud.level !== undefined) {
+          badgeLevelEl.textContent = `Lv.${hud.level}`;
+        }
+        if (hud.gold !== undefined) {
+          badgeGoldEl.textContent = `🪙 ${hud.gold}`;
+        }
+        if (hud.name || hud.title) {
+          playerTitleEl.textContent = hud.name || hud.title;
+        }
+
+        // Inventory
+        if (Array.isArray(hud.inventory)) {
+          const currentInvJson = JSON.stringify(hud.inventory);
+          if (currentInvJson !== lastInventoryJson) {
+            lastInventoryJson = currentInvJson;
+            renderInventory(hud.inventory);
+          }
+        }
+
+        // Logs
+        if (Array.isArray(hud.logs)) {
+          const currentLogsJson = JSON.stringify(hud.logs);
+          if (currentLogsJson !== lastLogsJson) {
+            lastLogsJson = currentLogsJson;
+            renderLogs(hud.logs);
+          }
+        }
+
+        // Dialog
+        if (hud.dialog) {
+          renderDialog(hud.dialog);
+        } else if (hud.dialog === null) {
+          hideDialog();
+        }
+      }
+
+      function renderInventory(items) {
+        inventoryGridEl.innerHTML = '';
+        const totalSlots = 16;
+        let activeCount = 0;
+
+        for (let i = 0; i < totalSlots; i++) {
+          const item = items[i];
+          const slotEl = document.createElement('div');
+          slotEl.className = 'inv-slot';
+          slotEl.tabIndex = -1;
+
+          if (item) {
+            activeCount++;
+            slotEl.title = `${item.name || item.id}${item.description ? ' - ' + item.description : ''} (点击使用)`;
+            slotEl.innerHTML = `
+              <span class="slot-key-hint">${i + 1 <= 9 ? i + 1 : ''}</span>
+              <span class="slot-icon">${item.icon || '📦'}</span>
+              ${item.count && item.count > 1 ? `<span class="slot-count">${item.count}</span>` : ''}
+            `;
+
+            slotEl.addEventListener('click', (e) => {
+              // Send UI action via WebSocket
+              sendWs({
+                type: 'ui',
+                action: 'use_item',
+                slot: i,
+                id: item.id,
+                payload: { slot: i, id: item.id }
+              });
+              // CRITICAL: Immediately call blur so WASD focus is NEVER hijacked!
+              e.currentTarget.blur();
+              if (document.activeElement && document.activeElement.tagName !== 'INPUT') {
+                document.activeElement.blur();
+              }
+            });
+          } else {
+            slotEl.classList.add('empty');
+            slotEl.innerHTML = `<span class="slot-key-hint">${i + 1 <= 9 ? i + 1 : ''}</span>`;
+            slotEl.addEventListener('click', (e) => {
+              e.currentTarget.blur();
+            });
+          }
+
+          inventoryGridEl.appendChild(slotEl);
+        }
+
+        invCountBadgeEl.textContent = `${activeCount}/${totalSlots}`;
+      }
+
+      function renderLogs(logs) {
+        logContainerEl.innerHTML = '';
+        logs.forEach(log => {
+          appendLogLine(log.channel || 'system', log.text || log.message || String(log));
+        });
+        logContainerEl.scrollTop = logContainerEl.scrollHeight;
+      }
+
+      function appendLogLine(channel, text) {
+        const lineEl = document.createElement('div');
+        lineEl.className = 'log-line';
+
+        let tagClass = 'log-tag-system';
+        let tagText = '系统';
+        if (channel === 'combat') {
+          tagClass = 'log-tag-combat';
+          tagText = '战斗';
+        } else if (channel === 'chat') {
+          tagClass = 'log-tag-chat';
+          tagText = '对话';
+        } else if (channel === 'error') {
+          tagClass = 'log-tag-error';
+          tagText = '错误';
+        }
+
+        lineEl.innerHTML = `
+          <span class="log-tag ${tagClass}">[${tagText}]</span>
+          <span class="log-text">${escapeHtml(text)}</span>
+        `;
+        logContainerEl.appendChild(lineEl);
+        logContainerEl.scrollTop = logContainerEl.scrollHeight;
+      }
+
+      function renderDialog(dialog) {
+        dialogTitleEl.textContent = dialog.title || '交互提示';
+        dialogBodyEl.textContent = dialog.text || '';
+        dialogActionsEl.innerHTML = '';
+
+        const options = dialog.options || [{ text: '确定', action: 'dialog_confirm' }];
+        options.forEach(opt => {
+          const btn = document.createElement('button');
+          btn.className = 'dialog-btn';
+          btn.textContent = opt.text;
+          btn.addEventListener('click', (e) => {
+            sendWs({
+              type: 'ui',
+              action: opt.action || 'dialog_select',
+              payload: opt
+            });
+            btn.blur();
+            hideDialog();
+          });
+          dialogActionsEl.appendChild(btn);
+        });
+
+        dialogModalEl.classList.remove('hidden');
+      }
+
+      function hideDialog() {
+        dialogModalEl.classList.add('hidden');
+        if (document.activeElement && document.activeElement.tagName !== 'INPUT') {
+          document.activeElement.blur();
+        }
+      }
+
+      dialogCloseBtnEl.addEventListener('click', () => {
+        hideDialog();
+        sendWs({ type: 'ui', action: 'dialog_close', payload: null });
+      });
+
+      /* ==========================================================================
+         4. Theme Switching Support
+         ========================================================================== */
+      const THEMES = [
+        { id: 'cyberpunk', name: '赛博' },
+        { id: 'retro-terminal', name: '终端' },
+        { id: 'classic-rpg', name: '奇幻' },
+        { id: 'minimal', name: '极简' }
+      ];
+      let currentThemeIdx = 0;
+
+      function setTheme(themeId) {
+        const foundIdx = THEMES.findIndex(t => t.id === themeId);
+        if (foundIdx !== -1) {
+          currentThemeIdx = foundIdx;
+        }
+        document.body.className = `theme-${THEMES[currentThemeIdx].id}`;
+        themeNameEl.textContent = THEMES[currentThemeIdx].name;
+      }
+
+      themeBtnEl.addEventListener('click', (e) => {
+        currentThemeIdx = (currentThemeIdx + 1) % THEMES.length;
+        setTheme(THEMES[currentThemeIdx].id);
+        e.currentTarget.blur();
+      });
+
+      /* Keybindings Help Toggle */
+      helpBtnEl.addEventListener('click', (e) => {
+        helpModalEl.classList.toggle('hidden');
+        e.currentTarget.blur();
+      });
+
+      helpCloseBtnEl.addEventListener('click', () => {
+        helpModalEl.classList.add('hidden');
+        if (document.activeElement && document.activeElement.tagName !== 'INPUT') {
+          document.activeElement.blur();
+        }
+      });
+
+      /* Inventory Drawer Toggle */
+      invToggleBtnEl.addEventListener('click', (e) => {
+        rightPanelEl.classList.toggle('collapsed');
+        invToggleBtnEl.textContent = rightPanelEl.classList.contains('collapsed') ? '▶' : '◀';
+        e.currentTarget.blur();
+      });
+
+      /* Clear logs */
+      clearLogBtnEl.addEventListener('click', (e) => {
+        logContainerEl.innerHTML = '';
+        e.currentTarget.blur();
+      });
+
+      /* ==========================================================================
+         5. Keyboard & Event Handling (WASD / : / Focus Guard)
+         ========================================================================== */
+      window.addEventListener('keydown', (e) => {
+        const isInputFocused = (document.activeElement === cmdInputEl);
+
+        if (isInputFocused) {
+          if (e.key === 'Escape') {
+            cmdInputEl.blur();
+            e.preventDefault();
+          } else if (e.key === 'Enter') {
+            const text = cmdInputEl.value.trim();
+            if (text.length > 0) {
+              cmdHistory.push(text);
+              cmdHistoryIndex = cmdHistory.length;
+              sendWs({ type: 'cmd', input: text });
+            }
+            cmdInputEl.value = '';
+            cmdInputEl.blur();
+            e.preventDefault();
+          } else if (e.key === 'ArrowUp') {
+            if (cmdHistory.length > 0 && cmdHistoryIndex > 0) {
+              cmdHistoryIndex--;
+              cmdInputEl.value = cmdHistory[cmdHistoryIndex];
+              e.preventDefault();
+            }
+          } else if (e.key === 'ArrowDown') {
+            if (cmdHistoryIndex < cmdHistory.length - 1) {
+              cmdHistoryIndex++;
+              cmdInputEl.value = cmdHistory[cmdHistoryIndex];
+              e.preventDefault();
+            } else {
+              cmdHistoryIndex = cmdHistory.length;
+              cmdInputEl.value = '';
+              e.preventDefault();
+            }
+          }
+          // While input is focused, never send movement key events!
+          return;
+        }
+
+        // When input is NOT focused:
+        // Check for modal close on Escape
+        if (e.key === 'Escape') {
+          if (!dialogModalEl.classList.contains('hidden')) {
+            hideDialog();
+            e.preventDefault();
+            return;
+          }
+          if (!helpModalEl.classList.contains('hidden')) {
+            helpModalEl.classList.add('hidden');
+            e.preventDefault();
+            return;
+          }
+        }
+
+        // Pressing ':' focuses command input
+        if (e.key === ':') {
+          e.preventDefault();
+          cmdInputEl.value = '';
+          cmdInputEl.focus();
+          return;
+        }
+
+        // Prevent browser scrolling for game keys
+        const isGameKey = (
+          e.code === 'KeyW' || e.code === 'KeyA' || e.code === 'KeyS' || e.code === 'KeyD' ||
+          e.code.startsWith('Arrow') || e.code === 'Space' || e.code === 'Tab'
+        );
+
+        if (isGameKey) {
+          e.preventDefault();
+        }
+
+        // Send key input to server
+        sendWs({
+          type: 'key',
+          code: e.code,
+          shift: e.shiftKey,
+          ctrl: e.ctrlKey
+        });
+      });
+
+      // Command input Send button
+      cmdSendBtnEl.addEventListener('click', (e) => {
+        const text = cmdInputEl.value.trim();
+        if (text.length > 0) {
+          cmdHistory.push(text);
+          cmdHistoryIndex = cmdHistory.length;
+          sendWs({ type: 'cmd', input: text });
+        }
+        cmdInputEl.value = '';
+        cmdInputEl.blur();
+        e.currentTarget.blur();
+      });
+
+      /* ==========================================================================
+         6. WebSocket Connection & Auto Reconnect
+         ========================================================================== */
+      function updateConnectionStatus(state, text) {
+        connDotEl.className = `conn-dot ${state}`;
+        connTextEl.textContent = text;
+      }
+
+      function sendWs(data) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          if (data.Auth || data.Ping || data.Input || data.Command) {
+            ws.send(JSON.stringify(data));
+          } else {
+            ws.send(JSON.stringify({ Input: data }));
+          }
+        }
+      }
+
+      function connectWebSocket() {
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host || 'localhost:3000';
+        const urlParams = new URLSearchParams(window.location.search);
+        const token = urlParams.get('token') || ('player_' + Math.random().toString(36).substring(2, 8));
+        const wsUrl = `${protocol}//${host}/ws?token=${encodeURIComponent(token)}`;
+
+        updateConnectionStatus('connecting', '连接中...');
+
+        try {
+          ws = new WebSocket(wsUrl);
+        } catch (err) {
+          console.error('Failed to create WebSocket:', err);
+          scheduleReconnect();
+          return;
+        }
+
+        ws.onopen = () => {
+          reconnectAttempts = 0;
+          updateConnectionStatus('connected', '已连接');
+          appendLogLine('system', '已连接至服务器网关');
+          sendWs({ Auth: { token: token, client_version: '3.0.0' } });
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const raw = JSON.parse(event.data);
+            const data = raw.Snapshot || raw.Event || raw;
+
+            // Handle Composite Snapshot
+            if (data.screen !== undefined) {
+              // Update Screen
+              screenEl.innerHTML = parseAnsi(data.screen);
+
+              // Update Viewport Font Scaler
+              const cols = data.cols || currentCols || 80;
+              const rows = data.rows || currentRows || 24;
+              if (cols !== currentCols || rows !== currentRows) {
+                updateScreenFontSize(cols, rows);
+              }
+
+              // Update HUD
+              if (data.hud) {
+                updateHUD(data.hud);
+              }
+
+              // Tick FPS
+              frameCount++;
+              const now = performance.now();
+              if (now - lastFpsTime >= 1000) {
+                const fps = Math.round((frameCount * 1000) / (now - lastFpsTime));
+                fpsValEl.textContent = fps;
+                frameCount = 0;
+                lastFpsTime = now;
+              }
+            }
+            // Handle Standalone Events
+            else if (data.event) {
+              if (data.event === 'Welcome') {
+                appendLogLine('system', data.message || `欢迎进入 TextCraft! (ID: ${data.player_id})`);
+              } else if (data.event === 'Message') {
+                appendLogLine(data.channel || 'system', data.text);
+              } else if (data.event === 'Error') {
+                appendLogLine('error', data.text);
+              }
+            }
+          } catch (e) {
+            console.error('Error handling WebSocket message:', e);
+          }
+        };
+
+        ws.onclose = () => {
+          updateConnectionStatus('disconnected', '正在重连...');
+          scheduleReconnect();
+        };
+
+        ws.onerror = (err) => {
+          console.warn('WebSocket encountered error:', err);
+        };
+      }
+
+      function scheduleReconnect() {
+        if (reconnectTimer) return;
+        reconnectAttempts++;
+        const delay = Math.min(1000 * Math.pow(1.3, reconnectAttempts - 1), MAX_RECONNECT_DELAY);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          connectWebSocket();
+        }, delay);
+      }
+
+      connBtnEl.addEventListener('click', (e) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          connectWebSocket();
+        }
+        e.currentTarget.blur();
+      });
+
+      /* ==========================================================================
+         7. Initial Standalone Preview & Startup
+         ========================================================================== */
+      function initDemoScreen() {
+        // Render 16 initial inventory slots
+        renderInventory([
+          { id: 'sword_iron', name: '铁剑', icon: '⚔️', count: 1, description: '基础铁质短剑' },
+          { id: 'potion_hp', name: '生命药水', icon: '🧪', count: 3, description: '恢复 50 点生命值' },
+          { id: 'shield_wood', name: '木盾', icon: '🛡️', count: 1, description: '格挡伤害' },
+          { id: 'scroll_tp', name: '回城卷轴', icon: '📜', count: 2, description: '传送至主城' }
+        ]);
+
+        // Default initial HUD values
+        updateHUD({
+          theme: 'cyberpunk',
+          hp: 85,
+          max_hp: 100,
+          mp: 40,
+          max_mp: 50,
+          level: 3,
+          gold: 128,
+          logs: [
+            { channel: 'system', text: '欢迎来到 TextCraft 3.0 Hybrid UI 客户端' },
+            { channel: 'system', text: '按 W/A/S/D 控制移动，按 : 输入指令' },
+            { channel: 'combat', text: '你击中了哥布林，造成 12 点伤害！' },
+            { channel: 'system', text: '获得金币 +15' }
+          ]
+        });
+
+        // Initial preview ANSI ASCII art
+        const demoScreen =
+          '\x1b[2J\x1b[H' +
+          '\x1b[38;2;0;240;255;1m╔══════════════════════════════════════════════════════════════════════════════╗\x1b[0m\n' +
+          '\x1b[38;2;0;240;255;1m║  \x1b[38;2;255;255;255mTextCraft 3.0 Hybrid Engine - 纯 Scheme 核心 + 极速 ANSI 字符流           \x1b[38;2;0;240;255;1m║\x1b[0m\n' +
+          '\x1b[38;2;0;240;255;1m╚══════════════════════════════════════════════════════════════════════════════╝\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲\x1b[0m                                                                      \x1b[38;2;34;139;34m🌲\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲\x1b[0m      \x1b[38;2;255;215;0m🪙\x1b[0m (金币堆)                                                    \x1b[38;2;34;139;34m🌲\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲\x1b[0m                                \x1b[38;2;255;77;79;1m🐺\x1b[0m (荒原狼)                            \x1b[38;2;34;139;34m🌲\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲\x1b[0m                                                                      \x1b[38;2;34;139;34m🌲\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲\x1b[0m                    \x1b[38;2;0;240;255;1m@\x1b[0m (玩家: 冒险者)                                   \x1b[38;2;34;139;34m🌲\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲\x1b[0m                                                                      \x1b[38;2;34;139;34m🌲\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲\x1b[0m                                             \x1b[38;2;245;166;35m🏰\x1b[0m (古老城堡)              \x1b[38;2;34;139;34m🌲\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲\x1b[0m                                                                      \x1b[38;2;34;139;34m🌲\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲\x1b[0m              \x1b[38;2;139;69;19m═══════════════════════════════════════\x1b[0m                 \x1b[38;2;34;139;34m🌲\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲\x1b[0m                                                                      \x1b[38;2;34;139;34m🌲\x1b[0m\n' +
+          '\x1b[38;2;34;139;34m🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲🌲\x1b[0m\n' +
+          '\x1b[38;2;148;163;184m[提示] 正在等待服务端推流... 按 W/A/S/D 移动，按 : 输入指令\x1b[0m';
+
+        screenEl.innerHTML = parseAnsi(demoScreen);
+        updateScreenFontSize(80, 24);
+      }
+
+      // Initialize
+      initDemoScreen();
+      connectWebSocket();
+    })();
+  </script>
+</body>
+</html>
