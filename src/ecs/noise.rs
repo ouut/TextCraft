@@ -28,8 +28,8 @@ impl SimplexNoise {
     /// Create a new `SimplexNoise` instance initialized with the given `seed`.
     pub fn new(seed: u64) -> Self {
         let mut p = [0u8; 256];
-        for i in 0..256 {
-            p[i] = i as u8;
+        for (i, item) in p.iter_mut().enumerate() {
+            *item = i as u8;
         }
 
         // SplitMix64 deterministic PRNG for Fisher-Yates shuffle
@@ -48,10 +48,8 @@ impl SimplexNoise {
         }
 
         let mut perm = [0u8; 512];
-        for i in 0..256 {
-            perm[i] = p[i];
-            perm[i + 256] = p[i];
-        }
+        perm[..256].copy_from_slice(&p);
+        perm[256..].copy_from_slice(&p);
 
         Self { perm }
     }
@@ -127,7 +125,9 @@ impl SimplexNoise {
 /// Output is a 2D boolean grid (`Vec<Vec<bool>>`) where:
 /// - `true` represents a solid wall
 /// - `false` represents an open floor
+///
 /// Dimensions: `grid.len() == height`, `grid[y].len() == width`.
+#[allow(clippy::needless_range_loop)]
 pub fn generate_cave(
     width: usize,
     height: usize,
@@ -188,6 +188,7 @@ pub fn generate_cave(
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)]
 mod tests {
     use super::*;
 

@@ -194,7 +194,7 @@ impl SpatialGrid {
     pub fn is_opaque(&self, x: i32, y: i32) -> bool {
         self.at(x, y)
             .iter()
-            .any(|e| e.glyph.map_or(false, |g| g.opaque))
+            .any(|e| e.glyph.is_some_and(|g| g.opaque))
     }
 
     /// Check whether coordinate `(x, y)` has any solid entity.
@@ -202,7 +202,7 @@ impl SpatialGrid {
     pub fn is_solid(&self, x: i32, y: i32) -> bool {
         self.at(x, y)
             .iter()
-            .any(|e| e.glyph.map_or(false, |g| g.solid))
+            .any(|e| e.glyph.is_some_and(|g| g.solid))
     }
 
     /// Check whether coordinate `(x, y)` is passable (no solid entities).

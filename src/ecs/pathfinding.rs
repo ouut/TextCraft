@@ -31,8 +31,8 @@ impl PartialOrd for AStarNode {
 /// Manhattan distance for 4-way, Chebyshev distance for 8-way movement.
 #[inline]
 fn heuristic(pos: (i32, i32), goal: (i32, i32), allow_diagonal: bool) -> u32 {
-    let dx = (goal.0 - pos.0).abs() as u32;
-    let dy = (goal.1 - pos.1).abs() as u32;
+    let dx = (goal.0 - pos.0).unsigned_abs();
+    let dy = (goal.1 - pos.1).unsigned_abs();
     if allow_diagonal {
         dx.max(dy)
     } else {
@@ -222,9 +222,9 @@ where
                 continue;
             }
 
-            if !dist_map.contains_key(&next_pos) {
+            if let std::collections::hash_map::Entry::Vacant(e) = dist_map.entry(next_pos) {
                 let next_dist = dist + 1;
-                dist_map.insert(next_pos, next_dist);
+                e.insert(next_dist);
                 queue.push_back((next_pos, next_dist));
             }
         }

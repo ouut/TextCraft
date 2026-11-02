@@ -176,7 +176,7 @@ impl EcsWorld {
         self.world
             .entity_from_id(eid)
             .cloned::<Option<&DynamicProps>>()
-            .map_or(false, |p| p.has(key))
+            .is_some_and(|p| p.has(key))
     }
 
     /// Check whether the spatial index has no entities.
