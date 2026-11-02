@@ -168,6 +168,23 @@ impl EcsWorld {
             .and_then(|p| p.get(key).cloned())
     }
 
+    /// Check whether an entity has a specific dynamic property.
+    pub fn has_prop(&self, eid: u64, key: &str) -> bool {
+        if !self.exists(eid) {
+            return false;
+        }
+        self.world
+            .entity_from_id(eid)
+            .cloned::<Option<&DynamicProps>>()
+            .map_or(false, |p| p.has(key))
+    }
+
+    /// Check whether the spatial index has no entities.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.spatial.is_empty()
+    }
+
     /// Add a tag (named entity) to an entity.
     pub fn add_tag(&mut self, eid: u64, tag: &str) -> bool {
         if !self.exists(eid) {
@@ -370,9 +387,12 @@ mod tests {
     #[test]
     fn test_ecs_world_props_and_tags() {
         let mut ecs = EcsWorld::new();
+        assert!(ecs.is_empty());
         let e1 = ecs.spawn_named("Goblin");
 
+        assert!(!ecs.has_prop(e1, "hp"));
         ecs.set_prop(e1, "hp", serde_json::json!(50));
+        assert!(ecs.has_prop(e1, "hp"));
         assert_eq!(ecs.get_prop(e1, "hp"), Some(serde_json::json!(50)));
 
         assert!(!ecs.has_tag(e1, "Monster"));
