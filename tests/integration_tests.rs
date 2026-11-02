@@ -57,6 +57,7 @@ fn test_1_cli_argument_parsing_and_config() {
     assert!(args.watch);
     assert_eq!(args.log_level, LogLevel::Debug);
     assert_eq!(args.log_level.as_str(), "debug");
+    assert_eq!(args.web_dir, None);
     assert!((args.time_scale - 1.5).abs() < 1e-4);
     assert_eq!(args.admin_token, "my_super_token");
     assert_eq!(args.save_file, Some(PathBuf::from("my_save.json")));
@@ -81,8 +82,18 @@ fn test_1_cli_argument_parsing_and_config() {
     assert_eq!(default_args.autosave_sec, 30);
     assert!(default_args.save_file.is_none());
     assert_eq!(default_args.snapshot_heartbeat_ms, 1000);
+    assert_eq!(default_args.web_dir, None);
 
-    // 3. ServerConfig construction from parsed CLI args
+    // 3. Optional --web-dir argument parsing
+    let args_web = ServerArgs::try_parse_from([
+        "textcraft-server",
+        "--web-dir",
+        "/custom/static/dir",
+    ])
+    .expect("CLI args parsing with --web-dir should succeed");
+    assert_eq!(args_web.web_dir, Some(PathBuf::from("/custom/static/dir")));
+
+    // 4. ServerConfig construction from parsed CLI args
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse().unwrap();
     let config = ServerConfig::new(addr).with_embedded_assets(&EMBEDDED_WEB_ASSETS);
     assert_eq!(config.bind_addr, addr);
@@ -142,6 +153,50 @@ async fn test_2_http_asset_serving_embedded_web_terminal() {
     assert!(resp_str2.contains("id=\"mp-bar\""));
 
     server.handle.shutdown();
+}
+
+/// Test 2b: HTTP asset serving with custom web directory overrides embedded assets.
+#[tokio::test]
+async fn test_2b_http_asset_serving_custom_web_directory() {
+    let scripts_dir = get_scripts_dir();
+    let temp_dir = std::env::temp_dir().join(format!("textcraft_test_web_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+    let custom_html = "<!DOCTYPE html><html><body><h1>Custom Web Assets</h1></body></html>";
+    tokio::fs::write(temp_dir.join("index.html"), custom_html).await.unwrap();
+
+    let args = ServerArgs {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        scripts_dir,
+        watch: false,
+        log_level: LogLevel::Info,
+        time_scale: 1.0,
+        admin_token: "admin".to_string(),
+        save_file: None,
+        autosave_sec: 0,
+        snapshot_heartbeat_ms: 1000,
+        mcp_port: None,
+        web_dir: Some(temp_dir.clone()),
+    };
+
+    let server = TextCraftServer::start(args).await.unwrap();
+    let local_addr = server.local_addr();
+
+    let mut stream = TcpStream::connect(local_addr).await.unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let resp_str = String::from_utf8_lossy(&response);
+
+    assert!(resp_str.contains("HTTP/1.1 200 OK"));
+    assert!(resp_str.contains("Custom Web Assets"));
+
+    server.handle.shutdown();
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
 
 /// Test 3: WebSocket client join, welcome event received, initial snapshot received with cols, rows, screen (ANSI), and hud (hp, mp, inventory, logs).
