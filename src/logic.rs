@@ -50,6 +50,7 @@ pub struct SchemeLogic {
     watcher: Option<ScriptWatcher>,
     save_file: Option<PathBuf>,
     outbound_queue: Arc<Mutex<Vec<OutboundMessage>>>,
+    extra_version: u64,
 }
 
 impl SchemeLogic {
@@ -102,6 +103,18 @@ impl SchemeLogic {
             },
         );
 
+        // Register safe datum parser helper (uses Scheme Reader only, never evals)
+        let _ = app.engine.run(
+            r#"
+            (define (__engine:parse-datum s)
+              (with-handler
+                (lambda (err) s)
+                (let ((d (read (open-input-string s))))
+                  (if (eof-object? d) s d))))
+            "#
+            .to_string(),
+        );
+
         app.with_load_path(&scripts_dir);
 
         let watcher = if watch_scripts && scripts_dir.is_dir() {
@@ -116,6 +129,7 @@ impl SchemeLogic {
             watcher,
             save_file,
             outbound_queue,
+            extra_version: 0,
         })
     }
 
@@ -197,7 +211,31 @@ impl SchemeLogic {
 
     /// Handle player key input `(engine:on-input pid input)`.
     pub fn on_input(&mut self, pid: u64, input: &PlayerInput) -> Result<(), String> {
-        let json = serde_json::to_value(input).map_err(|e| e.to_string())?;
+        let json = match input {
+            PlayerInput::Key {
+                code,
+                shift,
+                ctrl,
+                alt,
+            } => {
+                let mut map = serde_json::Map::with_capacity(5);
+                map.insert("type".to_string(), Value::String("key".to_string()));
+                map.insert("code".to_string(), Value::String(code.clone()));
+                map.insert("shift".to_string(), Value::Bool(*shift));
+                map.insert("ctrl".to_string(), Value::Bool(*ctrl));
+                map.insert("alt".to_string(), Value::Bool(*alt));
+                Value::Object(map)
+            }
+            PlayerInput::Mouse { x, y, button } => {
+                let mut map = serde_json::Map::with_capacity(4);
+                map.insert("type".to_string(), Value::String("mouse".to_string()));
+                map.insert("x".to_string(), Value::Number((*x).into()));
+                map.insert("y".to_string(), Value::Number((*y).into()));
+                map.insert("button".to_string(), Value::String(button.clone()));
+                Value::Object(map)
+            }
+            _ => serde_json::to_value(input).map_err(|e| e.to_string())?,
+        };
         let val = json_to_steel_val(&json);
         let args = vec![SteelVal::IntV(pid as isize), val];
         self.app
@@ -227,18 +265,16 @@ impl SchemeLogic {
 
     /// Handle normal player command `(engine:on-command pid datum raw)`.
     pub fn on_command(&mut self, pid: u64, raw: &str) -> Result<(), String> {
+        let raw_val = SteelVal::StringV(raw.to_string().into());
         let datum = self
             .app
-            .engine
-            .run(format!("'{}", raw))
-            .ok()
-            .and_then(|vals| vals.into_iter().next())
-            .unwrap_or_else(|| SteelVal::StringV(raw.to_string().into()));
+            .safe_call_function("__engine:parse-datum", vec![raw_val.clone()], 100)
+            .unwrap_or_else(|_| raw_val.clone());
 
         let args = vec![
             SteelVal::IntV(pid as isize),
             datum,
-            SteelVal::StringV(raw.to_string().into()),
+            raw_val,
         ];
         self.app
             .safe_call_function("engine:on-command", args, 500)
@@ -253,6 +289,35 @@ impl SchemeLogic {
             .app
             .safe_call_function("engine:render-snapshot", args, 500)
             .map_err(|e| format!("engine:render-snapshot error: {}", e))?;
+
+        if let SteelVal::HashMapV(ref hm) = val {
+            let k_cols = SteelVal::StringV("cols".into());
+            let k_rows = SteelVal::StringV("rows".into());
+            let k_screen = SteelVal::StringV("screen".into());
+            let k_hud = SteelVal::StringV("hud".into());
+
+            if let (
+                Some(SteelVal::IntV(cols)),
+                Some(SteelVal::IntV(rows)),
+                Some(SteelVal::StringV(screen)),
+                Some(hud_val),
+            ) = (
+                hm.get(&k_cols),
+                hm.get(&k_rows),
+                hm.get(&k_screen),
+                hm.get(&k_hud),
+            ) {
+                let hud = steel_val_to_json(hud_val)
+                    .map_err(|e| format!("steel_val_to_json error: {}", e))?;
+                return Ok(PlayerSnapshot {
+                    cols: *cols as u16,
+                    rows: *rows as u16,
+                    screen: screen.to_string(),
+                    hud,
+                });
+            }
+        }
+
         let json = steel_val_to_json(&val)
             .map_err(|e| format!("steel_val_to_json error: {}", e))?;
         let snapshot: PlayerSnapshot = serde_json::from_value(json)
@@ -260,8 +325,18 @@ impl SchemeLogic {
         Ok(snapshot)
     }
 
+    /// Query current visual version counter to short-circuit unchanged snapshot rendering.
+    pub fn visual_version(&self) -> u64 {
+        let base = match self.app.extract_value("*visual-version*") {
+            Ok(SteelVal::IntV(v)) => v as u64,
+            _ => 0,
+        };
+        base.wrapping_add(self.extra_version)
+    }
+
     /// Evaluate expression in REPL style with watchdog timeout.
     pub fn eval_repl(&mut self, code: &str) -> Result<String, String> {
+        self.extra_version = self.extra_version.wrapping_add(1);
         self.app
             .safe_eval(code, 1000)
             .map_err(|e| format!("REPL error: {}", e))
@@ -278,6 +353,7 @@ impl SchemeLogic {
 
     /// Import world state from JSON value via `(engine:import-state data)`.
     pub fn import_state(&mut self, data: &Value) -> Result<(), String> {
+        self.extra_version = self.extra_version.wrapping_add(1);
         let val = json_to_steel_val(data);
         self.app
             .safe_call_function("engine:import-state", vec![val], 1000)
@@ -349,26 +425,48 @@ impl SchemeLogic {
         if is_modified {
             tracing::info!("Script changes detected, reloading scripts...");
             let state = self.export_state().ok();
-            let mut files = self
+            let mut files: Vec<PathBuf> = self
                 .watcher
                 .as_ref()
                 .map(|w| w.tracked_files())
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|f| {
+                    f.parent() == Some(self.scripts_dir.as_path())
+                        && f.extension().is_some_and(|ext| ext == "scm")
+                })
+                .collect();
             sort_script_files(&mut files);
 
+            // Read all target files first before running any compilation
+            let mut sources = Vec::with_capacity(files.len());
             for file in files {
                 let code = std::fs::read_to_string(&file)?;
-                self.app
+                sources.push((file, code));
+            }
+
+            for (file, code) in sources {
+                if let Err(e) = self
+                    .app
                     .engine
-                    .compile_and_run_raw_program_with_path(code, file)
-                    .map_err(|e| {
-                        std::io::Error::other(e.to_string())
-                    })?;
+                    .compile_and_run_raw_program_with_path(code, file.clone())
+                {
+                    tracing::warn!(
+                        file = %file.display(),
+                        error = %e,
+                        "Failed to compile script during hot reload, restoring state"
+                    );
+                    if let Some(st) = state {
+                        let _ = self.import_state(&st);
+                    }
+                    return Err(Box::new(std::io::Error::other(e.to_string())));
+                }
             }
 
             if let Some(st) = state {
                 let _ = self.import_state(&st);
             }
+            self.extra_version = self.extra_version.wrapping_add(1);
 
             tracing::info!("Scripts reloaded successfully with state preserved");
             return Ok(true);

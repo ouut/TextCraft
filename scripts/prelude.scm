@@ -6,6 +6,9 @@
 (define *chunk-size* 16)
 (define *esc* "\x1b;")
 (define *ansi-reset* (string-append *esc* "[0m"))
+(define *visual-version* 1)
+(define (bump-visual-version!)
+  (set! *visual-version* (+ *visual-version* 1)))
 
 ;; ----------------------------------------------------------------------------
 ;; Generic Helpers
@@ -42,10 +45,18 @@
 ;; ----------------------------------------------------------------------------
 
 (define (engine:set-double-width! enabled?)
-  (set! *world-state* (hash-insert *world-state* "double_width" (if enabled? #t #f))))
+  (set! *world-state* (hash-insert *world-state* "double_width" (if enabled? #t #f)))
+  (bump-visual-version!))
 
 (define (engine:double-width?)
   (map-get *world-state* "double_width" #f))
+
+(define (player:double-width? player-id)
+  (let ((p (get-player player-id)))
+    (if (and p (hash-contains? p "double_width"))
+        (let ((v (hash-ref p "double_width")))
+          (if (boolean? v) v (engine:double-width?)))
+        (engine:double-width?))))
 
 ;; ----------------------------------------------------------------------------
 ;; Global World State (Pure Data - Zero Lambdas/Closures)
@@ -59,6 +70,7 @@
     "idle_timer" 0.0
     "chunks" (hash)
     "players" (hash)
+    "saved_players" (hash)
     "monsters" '()
     "timers" (hash)))
 
@@ -84,6 +96,7 @@
          (new-chunk (hash-insert chunk "tiles" new-tiles))
          (new-chunks (hash-insert chunks ckey new-chunk)))
     (set! *world-state* (hash-insert *world-state* "chunks" new-chunks))
+    (bump-visual-version!)
     tile-map))
 
 (define (world:get-tile x y layer)
@@ -111,6 +124,7 @@
                      (new-chunk (hash-insert chunk "tiles" new-tiles))
                      (new-chunks (hash-insert chunks ckey new-chunk)))
                 (set! *world-state* (hash-insert *world-state* "chunks" new-chunks))
+                (bump-visual-version!)
                 #t)
               #f))
         #f)))
@@ -119,7 +133,8 @@
   (set! *world-state*
     (hash-insert
       (hash-insert *world-state* "chunks" (hash))
-      "monsters" '())))
+      "monsters" '()))
+  (bump-visual-version!))
 
 ;; ----------------------------------------------------------------------------
 ;; Player State Helpers
@@ -131,6 +146,7 @@
     "token" (if (string? token) token (to-string token))
     "name" (string-append "Hero#" (to-string player-id))
     "theme" "cyberpunk"
+    "double_width" #f
     "x" 0
     "y" 0
     "cols" 80
@@ -164,17 +180,33 @@
 
 (define (set-player player-id player-map)
   (let* ((pid-key (to-string player-id))
-         (players (map-get *world-state* "players" (hash))))
-    (set! *world-state*
-      (hash-insert *world-state* "players"
-        (hash-insert players pid-key player-map)))))
+         (players (map-get *world-state* "players" (hash)))
+         (new-players (hash-insert players pid-key player-map))
+         (tok (map-get player-map "token" ""))
+         (ws1 (hash-insert *world-state* "players" new-players)))
+    (if (and (string? tok) (not (string=? tok "")))
+        (let* ((saved (map-get ws1 "saved_players" (hash)))
+               (new-saved (hash-insert saved tok player-map)))
+          (set! *world-state* (hash-insert ws1 "saved_players" new-saved)))
+        (set! *world-state* ws1))
+    (bump-visual-version!)))
 
 (define (remove-player player-id)
   (let* ((pid-key (to-string player-id))
-         (players (map-get *world-state* "players" (hash))))
+         (players (map-get *world-state* "players" (hash)))
+         (cur-p (map-get players pid-key #f))
+         (ws0 (if cur-p
+                  (let ((tok (map-get cur-p "token" "")))
+                    (if (and (string? tok) (not (string=? tok "")))
+                        (let* ((saved (map-get *world-state* "saved_players" (hash)))
+                               (new-saved (hash-insert saved tok cur-p)))
+                          (hash-insert *world-state* "saved_players" new-saved))
+                        *world-state*))
+                  *world-state*)))
     (set! *world-state*
-      (hash-insert *world-state* "players"
-        (hash-remove players pid-key)))))
+      (hash-insert ws0 "players"
+        (hash-remove players pid-key)))
+    (bump-visual-version!)))
 
 (define (player:add-log player-id channel text)
   (let* ((p (ensure-player player-id))
@@ -209,11 +241,12 @@
 ;; Dynamic Viewport ANSI Rasterizer
 ;; ----------------------------------------------------------------------------
 
-(define (resolve-cell-ansi x y tiles is-self self-tile other-player is-dw)
-  (let* ((overlay-tile (if tiles (map-get tiles (tile-key x y "overlay") #f) #f))
-         (actor-tile   (if tiles (map-get tiles (tile-key x y "actor") #f) #f))
-         (surface-tile (if tiles (map-get tiles (tile-key x y "surface") #f) #f))
-         (terrain-tile (if tiles (map-get tiles (tile-key x y "terrain") #f) #f))
+(define (resolve-cell-parts x y tiles is-self self-tile other-player is-dw)
+  (let* ((base-xy (string-append (number->string x) "," (number->string y) ","))
+         (overlay-tile (if tiles (map-get tiles (string-append base-xy "overlay") #f) #f))
+         (actor-tile   (if tiles (map-get tiles (string-append base-xy "actor") #f) #f))
+         (surface-tile (if tiles (map-get tiles (string-append base-xy "surface") #f) #f))
+         (terrain-tile (if tiles (map-get tiles (string-append base-xy "terrain") #f) #f))
          ;; Determine top visible tile for glyph and foreground
          (top-tile (cond
                      (overlay-tile overlay-tile)
@@ -231,7 +264,7 @@
                        (if terrain-tile (map-get terrain-tile "bg" #f) #f)))
                  (if terrain-tile (map-get terrain-tile "bg" #f) #f))))
     (if (not top-tile)
-        (if is-dw "  " " ")
+        (list (if is-dw "  " " ") "" "")
         (let* ((glyph (map-get top-tile "glyph" " "))
                (raw-glyph-str (if (char? glyph) (string glyph) (if (string? glyph) glyph (to-string glyph))))
                (glyph-str (if (and is-dw (<= (string-length raw-glyph-str) 1))
@@ -244,15 +277,22 @@
                (bg-str (if (and (list? bg) (= (length bg) 3))
                            (ansi-bg (car bg) (cadr bg) (caddr bg))
                            "")))
-          (if (and (string=? fg-str "") (string=? bg-str ""))
-              glyph-str
-              (string-append fg-str bg-str glyph-str *ansi-reset*))))))
+          (list glyph-str fg-str bg-str)))))
+
+(define (resolve-cell-ansi x y tiles is-self self-tile other-player is-dw)
+  (let* ((parts (resolve-cell-parts x y tiles is-self self-tile other-player is-dw))
+         (glyph-str (car parts))
+         (fg-str (cadr parts))
+         (bg-str (caddr parts)))
+    (if (and (string=? fg-str "") (string=? bg-str ""))
+        glyph-str
+        (string-append fg-str bg-str glyph-str *ansi-reset*))))
 
 (define (render-viewport-ansi player-id cols rows)
   (let* ((p (get-player player-id))
          (px (if p (map-get p "x" 0) 0))
          (py (if p (map-get p "y" 0) 0))
-         (is-dw (engine:double-width?))
+         (is-dw (or (engine:double-width?) (player:double-width? player-id)))
          (grid-cols (if is-dw (quotient cols 2) cols))
          (half-w (quotient grid-cols 2))
          (half-h (quotient rows 2))
@@ -262,44 +302,70 @@
          (chunks (map-get *world-state* "chunks" (hash)))
          (players (map-get *world-state* "players" (hash)))
          (cur-pid-key (to-string player-id))
-         ;; Collect other players for quick proximity checking
-         (other-players
-           (let ((res '()))
+         ;; Pre-index other players by coordinate for O(1) lookup
+         (other-player-map
+           (let ((res (hash)))
              (for-each
                (lambda (k)
                  (if (not (string=? k cur-pid-key))
-                     (let ((op (hash-ref players k)))
-                       (set! res (cons op res)))
+                     (let* ((op (hash-ref players k))
+                            (ox (map-get op "x" 0))
+                            (oy (map-get op "y" 0))
+                            (okey (string-append (number->string ox) "," (number->string oy)))
+                            (otile (hash "glyph" "@" "fg" '(100 200 255) "bg" #f "solid" #t "name" (map-get op "name" "player"))))
+                       (set! res (hash-insert res okey otile)))
                      #f))
                (hash-keys->list players))
              res)))
     (let loop-row ((r 0) (row-acc '()))
       (if (< r rows)
           (let* ((y (+ top r))
+                 (y-str (number->string y))
                  (chk-y (coord->chunk-coord y))
                  (row-str
-                   (let loop-col ((c 0) (col-acc '()))
+                   (let loop-col ((c 0)
+                                  (last-chk-x #f)
+                                  (last-tiles #f)
+                                  (cur-fg "")
+                                  (cur-bg "")
+                                  (col-acc '()))
                      (if (< c grid-cols)
                          (let* ((x (+ left c))
                                 (chk-x (coord->chunk-coord x))
-                                (ckey (chunk-key chk-x chk-y))
-                                (chunk (map-get chunks ckey #f))
-                                (tiles (if chunk (map-get chunk "tiles" (hash)) #f))
+                                (tiles (if (and last-chk-x (= chk-x last-chk-x))
+                                           last-tiles
+                                           (let ((chunk (map-get chunks (chunk-key chk-x chk-y) #f)))
+                                             (if chunk (map-get chunk "tiles" (hash)) #f))))
                                 (is-self (and (= x px) (= y py)))
                                 (other-p
                                   (if is-self
                                       #f
-                                      (let find-op ((ps other-players))
-                                        (if (null? ps)
-                                            #f
-                                            (let* ((cand (car ps))
-                                                   (cx (map-get cand "x" 0))
-                                                   (cy (map-get cand "y" 0)))
-                                              (if (and (= cx x) (= cy y))
-                                                  (hash "glyph" "@" "fg" '(100 200 255) "bg" #f "solid" #t "name" (map-get cand "name" "player"))
-                                                  (find-op (cdr ps))))))))
-                                (cell-str (resolve-cell-ansi x y tiles is-self self-tile other-p is-dw)))
-                           (loop-col (+ c 1) (cons cell-str col-acc)))
-                         (string-join (reverse col-acc) "")))))
+                                      (map-get other-player-map (string-append (number->string x) "," y-str) #f)))
+                                (parts (resolve-cell-parts x y tiles is-self self-tile other-p is-dw))
+                                (glyph-str (car parts))
+                                (fg-str (cadr parts))
+                                (bg-str (caddr parts))
+                                (same-color? (and (string=? fg-str cur-fg) (string=? bg-str cur-bg)))
+                                (cell-out
+                                  (if same-color?
+                                      glyph-str
+                                      (let* ((had-color? (not (and (string=? cur-fg "") (string=? cur-bg ""))))
+                                             (has-color? (not (and (string=? fg-str "") (string=? bg-str ""))))
+                                             (need-reset? (or (and (not (string=? cur-fg "")) (string=? fg-str ""))
+                                                              (and (not (string=? cur-bg "")) (string=? bg-str ""))))
+                                             (prefix (if (and had-color? (or (not has-color?) need-reset?))
+                                                         *ansi-reset*
+                                                         ""))
+                                             (eff-fg (if (and (not need-reset?) (string=? fg-str cur-fg)) "" fg-str))
+                                             (eff-bg (if (and (not need-reset?) (string=? bg-str cur-bg)) "" bg-str)))
+                                        (string-append prefix eff-fg eff-bg glyph-str)))))
+                           (loop-col (+ c 1) chk-x tiles fg-str bg-str (cons cell-out col-acc)))
+                         (let* ((end-reset (if (and (string=? cur-fg "") (string=? cur-bg ""))
+                                               ""
+                                               *ansi-reset*))
+                                (final-cols (if (string=? end-reset "")
+                                                col-acc
+                                                (cons end-reset col-acc))))
+                           (string-join (reverse final-cols) ""))))))
             (loop-row (+ r 1) (cons row-str row-acc)))
           (string-join (reverse row-acc) "\n")))))

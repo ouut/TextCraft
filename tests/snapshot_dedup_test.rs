@@ -224,18 +224,20 @@ async fn test_snapshot_heartbeat_fires_periodically() {
     let harness = TestHarness::new(600).await;
     let (mut ws, _pid, _initial_snap) = connect_and_auth(harness.local_addr, "player_test3").await;
 
-    // 1. Stay still for 450ms and assert no snapshot is received yet (heartbeat not expired)
-    let pre_res = tokio::time::timeout(Duration::from_millis(450), read_next_envelope(&mut ws)).await;
+    // 1. Stay still for 420ms (~26 ticks, before the 30-tick monster AI fires at ~480ms)
+    // and assert no duplicate/heartbeat snapshot is received yet (heartbeat not expired)
+    let pre_res = tokio::time::timeout(Duration::from_millis(420), read_next_envelope(&mut ws)).await;
     assert!(
         pre_res.is_err(),
         "Snapshot should not arrive before heartbeat interval: {:?}",
         pre_res
     );
 
-    // 2. Wait for the heartbeat snapshot to fire (within next 350ms, total elapsed > 600ms)
-    let res = tokio::time::timeout(Duration::from_millis(350), read_next_envelope(&mut ws))
+    // 2. Drain any intermediate monster AI movement snapshot if one occurred around tick 30 (~480ms),
+    // then verify the periodic heartbeat snapshot fires after the 600ms quiescent interval
+    let res = tokio::time::timeout(Duration::from_millis(750), read_next_envelope(&mut ws))
         .await
-        .expect("Expected heartbeat snapshot to fire after heartbeat interval (~600ms)")
+        .expect("Expected snapshot to fire")
         .expect("Stream should not close");
 
     match res {

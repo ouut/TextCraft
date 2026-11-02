@@ -220,11 +220,22 @@
   'ok)
 
 (define (engine:on-player-join pid token)
-  (let ((p (make-default-player pid token)))
-    (set-player pid p)
-    (touch-activity!)
-    (player:add-log pid "system" "已成功连接至 TextCraft 3.0 纯 Scheme 虚拟世界！")
-    'ok))
+  (let* ((tok-str (if (string? token) token (to-string token)))
+         (saved (map-get *world-state* "saved_players" (hash)))
+         (saved-p (if (not (string=? tok-str ""))
+                      (map-get saved tok-str #f)
+                      #f)))
+    (if saved-p
+        (let ((restored-p (hash-insert (hash-insert saved-p "id" pid) "token" tok-str)))
+          (set-player pid restored-p)
+          (touch-activity!)
+          (player:add-log pid "system" "欢迎回来！已恢复你的角色存档进度。")
+          'ok)
+        (let ((p (make-default-player pid tok-str)))
+          (set-player pid p)
+          (touch-activity!)
+          (player:add-log pid "system" "已成功连接至 TextCraft 3.0 纯 Scheme 虚拟世界！")
+          'ok))))
 
 (define (engine:on-player-leave pid)
   (remove-player pid)
@@ -255,11 +266,7 @@
                (players (map-get *world-state* "players" (hash)))
                (p-keys (hash-keys->list players)))
           (if (not (null? p-keys))
-              (let* ((first-p (hash-ref players (car p-keys)))
-                     (px (map-get first-p "x" 0))
-                     (py (map-get first-p "y" 0))
-                     (pid (map-get first-p "id" 1))
-                     (new-monsters '()))
+              (let ((new-monsters '()))
                 (for-each
                   (lambda (m)
                     (let* ((mx (map-get m "x" 0))
@@ -267,36 +274,74 @@
                            (mhp (map-get m "hp" 0))
                            (mname (map-get m "name" "怪物"))
                            (mattack (map-get m "attack" 5))
-                           (dist (+ (abs (- mx px)) (abs (- my py)))))
+                           (cur-players (map-get *world-state* "players" (hash)))
+                           (cur-p-keys (hash-keys->list cur-players))
+                           ;; Find closest online player by Manhattan distance
+                           (nearest-info
+                             (let loop-pk ((ks cur-p-keys) (best-p #f) (best-dist 999999))
+                               (if (null? ks)
+                                   (cons best-p best-dist)
+                                   (let* ((cand-p (hash-ref cur-players (car ks)))
+                                          (cx (map-get cand-p "x" 0))
+                                          (cy (map-get cand-p "y" 0))
+                                          (d (+ (abs (- mx cx)) (abs (- my cy)))))
+                                     (if (< d best-dist)
+                                         (loop-pk (cdr ks) cand-p d)
+                                         (loop-pk (cdr ks) best-p best-dist))))))
+                           (target-p (car nearest-info))
+                           (dist (cdr nearest-info)))
                       (if (> mhp 0)
-                          (if (= dist 1)
-                              ;; Monster attacks player
-                              (let* ((cur-hp (map-get first-p "hp" 100))
-                                     (next-hp (max 0 (- cur-hp mattack)))
-                                     (p-damaged (hash-insert first-p "hp" next-hp)))
-                                (set-player pid p-damaged)
-                                (player:add-log pid "combat"
-                                  (string-append mname " 对你发动攻击，造成 " (number->string mattack) " 点伤害！"))
-                                (touch-activity!)
-                                (set! new-monsters (cons m new-monsters)))
-                              ;; Monster wanders or stalks
-                              (let* ((dx (if (< mx px) 1 (if (> mx px) -1 0)))
-                                     (dy (if (< my py) 1 (if (> my py) -1 0)))
-                                     (target-x (+ mx dx))
-                                     (target-y my)
-                                     (blocked (or (check-wall-collision target-x target-y)
-                                                  (world:get-tile target-x target-y 'surface)
-                                                  (world:get-tile target-x target-y 'actor)
-                                                  (and (= target-x px) (= target-y py)))))
-                                (if (and (not blocked) (or (not (= dx 0)) (not (= dy 0))))
-                                    (begin
-                                      (world:remove-tile mx my 'actor)
-                                      (let ((m-updated (hash-insert m "x" target-x)))
-                                        (world:set-tile target-x target-y 'actor
-                                          (hash "glyph" (map-get m "glyph" "m") "fg" (map-get m "fg" '(200 100 100))
-                                                "bg" #f "solid" #t "name" mname "meta" m-updated))
-                                        (set! new-monsters (cons m-updated new-monsters))))
-                                    (set! new-monsters (cons m new-monsters)))))
+                          (if target-p
+                              (let ((px (map-get target-p "x" 0))
+                                    (py (map-get target-p "y" 0))
+                                    (pid (map-get target-p "id" 1)))
+                                (if (= dist 1)
+                                    ;; Monster attacks closest player
+                                    (let* ((cur-hp (map-get target-p "hp" 100))
+                                           (next-hp (max 0 (- cur-hp mattack)))
+                                           (p-damaged (hash-insert target-p "hp" next-hp)))
+                                      (set-player pid p-damaged)
+                                      (player:add-log pid "combat"
+                                        (string-append mname " 对你发动攻击，造成 " (number->string mattack) " 点伤害！"))
+                                      (touch-activity!)
+                                      (set! new-monsters (cons m new-monsters)))
+                                    ;; Monster stalks closest player along X or Y axis
+                                    (let* ((dx (if (< mx px) 1 (if (> mx px) -1 0)))
+                                           (dy (if (< my py) 1 (if (> my py) -1 0)))
+                                           (is-tile-blocked?
+                                             (lambda (tx ty)
+                                               (or (check-wall-collision tx ty)
+                                                   (world:get-tile tx ty 'surface)
+                                                   (world:get-tile tx ty 'actor)
+                                                   (let any-p ((ks cur-p-keys))
+                                                     (if (null? ks)
+                                                         #f
+                                                         (let ((op (hash-ref cur-players (car ks))))
+                                                           (if (and (= (map-get op "x" 0) tx)
+                                                                    (= (map-get op "y" 0) ty))
+                                                               #t
+                                                               (any-p (cdr ks)))))))))
+                                           ;; Prefer X axis first; only move along Y axis if dx == 0 or X step is blocked
+                                           (step-x (if (not (= dx 0)) (cons (+ mx dx) my) #f))
+                                           (step-y (if (not (= dy 0)) (cons mx (+ my dy)) #f))
+                                           (chosen-step
+                                             (cond
+                                               ((and step-x (not (is-tile-blocked? (car step-x) (cdr step-x))))
+                                                step-x)
+                                               ((and step-y (not (is-tile-blocked? (car step-y) (cdr step-y))))
+                                                step-y)
+                                               (else #f))))
+                                      (if chosen-step
+                                          (let ((target-x (car chosen-step))
+                                                (target-y (cdr chosen-step)))
+                                            (world:remove-tile mx my 'actor)
+                                            (let ((m-updated (hash-insert (hash-insert m "x" target-x) "y" target-y)))
+                                              (world:set-tile target-x target-y 'actor
+                                                (hash "glyph" (map-get m "glyph" "m") "fg" (map-get m "fg" '(200 100 100))
+                                                      "bg" #f "solid" #t "name" mname "meta" m-updated))
+                                              (set! new-monsters (cons m-updated new-monsters))))
+                                          (set! new-monsters (cons m new-monsters))))))
+                              (set! new-monsters (cons m new-monsters)))
                           #f)))
                   monsters)
                 (set! *world-state* (hash-insert *world-state* "monsters" (reverse new-monsters))))
@@ -393,8 +438,12 @@
 
                        ;; Talk to Merchant NPC
                        ((equal? aname "merchant")
-                        (let ((dialog-text (map-get ameta "dialog" "你好，旅行者！")))
-                          (set-player pid (hash-insert p "dialog" dialog-text))
+                        (let ((dialog-text (map-get ameta "dialog" "你好，旅行者！"))
+                              (dialog-obj (hash "title" "神秘商人"
+                                                "text" (map-get ameta "dialog" "你好，旅行者！")
+                                                "options" (list (hash "text" "购买生命药水 (25G)" "action" "buy_potion")
+                                                                (hash "text" "离开" "action" "close_dialog")))))
+                          (set-player pid (hash-insert p "dialog" dialog-obj))
                           (set-target-fps! 30)
                           (player:add-log pid "system" (string-append "商人: " dialog-text))))
 
@@ -490,8 +539,34 @@
           (player:add-log pid "system" (string-append "使用了物品: " (to-string item-id))))))
 
       ;; Close dialog
-      ((equal? action "close_dialog")
+      ((or (equal? action "close_dialog") (equal? action "dialog_close") (equal? action "dialog_confirm"))
        (set-player pid (hash-insert p "dialog" #f)))
+
+      ;; Buy potion from merchant dialog
+      ((equal? action "buy_potion")
+       (let ((cur-gold (map-get p "gold" 0)))
+         (if (>= cur-gold 25)
+             (begin
+               (set-player pid (hash-insert (hash-insert p "gold" (- cur-gold 25)) "dialog" #f))
+               (player:add-item pid "potion" "生命药水" "🧪" 1)
+               (player:add-log pid "system" "你花费 25 金币购买了生命药水 x1！"))
+             (begin
+               (set-player pid (hash-insert p "dialog" #f))
+               (player:add-log pid "system" "金币不足（需要 25 金币）！")))))
+
+      ;; Set HUD theme from client UI
+      ((equal? action "set_theme")
+       (let* ((payload (map-get action-map "payload" (hash)))
+              (t (map-get action-map "theme" (if (hash? payload) (map-get payload "theme" "") ""))))
+         (if (and (string? t) (not (string=? t "")))
+             (begin
+               (set-player pid (hash-insert p "theme" t))
+               (player:add-log pid "system" (string-append "HUD 主题切换为: " t)))
+             #f)))
+
+      ;; Clear player logs from client UI
+      ((equal? action "clear_logs")
+       (set-player pid (hash-insert p "logs" '())))
 
       ;; Viewport resize from client
       ((equal? action "set_viewport")
@@ -516,11 +591,13 @@
            (equal? datum '(double-width)) (equal? datum 'double-width)
            (and (pair? datum) (or (equal? (car datum) 'dw) (equal? (car datum) 'double-width))))
        (let* ((arg (if (and (pair? datum) (pair? (cdr datum))) (cadr datum) 'toggle))
+              (cur-dw (player:double-width? pid))
               (new-state (cond
-                           ((equal? arg 'toggle) (not (engine:double-width?)))
+                           ((equal? arg 'toggle) (not cur-dw))
                            ((or (equal? arg #t) (equal? arg 1) (equal? arg 'on)) #t)
                            (else #f))))
          (engine:set-double-width! new-state)
+         (set-player pid (hash-insert p "double_width" new-state))
          (player:add-log pid "system"
            (if new-state
                "已开启【双宽字符模式】(1:1 正方形网格，横向扩展对齐)"
@@ -539,8 +616,17 @@
          (player:add-log pid "combat" "受到神秘祈福，HP与MP已完全恢复！")))
 
       ((and (pair? datum) (equal? (car datum) 'say) (pair? (cdr datum)))
-       (let ((txt (if (string? (cadr datum)) (cadr datum) (to-string (cadr datum)))))
-         (player:add-log pid "chat" (string-append "说: " txt))))
+       (let* ((txt (if (string? (cadr datum)) (cadr datum) (to-string (cadr datum))))
+              (pname (map-get p "name" (string-append "Hero#" (to-string pid))))
+              (msg (string-append pname " 说: " txt))
+              (players (map-get *world-state* "players" (hash))))
+         (for-each
+           (lambda (k)
+             (let* ((op (hash-ref players k))
+                    (op-id (map-get op "id" k)))
+               (player:add-log op-id "chat" msg)))
+           (hash-keys->list players))
+         (engine:broadcast "chat" msg)))
 
       ((and (pair? datum) (equal? (car datum) 'fps) (pair? (cdr datum)))
        (let ((f (cadr datum)))
@@ -579,5 +665,6 @@
   (if (hash? data)
       (begin
         (set! *world-state* data)
+        (bump-visual-version!)
         'ok)
       'error))

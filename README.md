@@ -66,16 +66,23 @@ TextCraft/
   │   ├── runtime.rs                # Axum 静态资源嵌入、WebSocket 网关与自适应调度
   │   └── types.rs                  # 传输层极简协议 (PlayerInput, PlayerSnapshot, Event)
   ├── web/
-  │   └── index.html                # 单文件现代化 Hybrid Web Terminal (CSS/JS 内嵌)
+  │   └── index.html                # 极简 Hybrid Web 客户端 (内置 window.TextCraft SDK 与基础 HUD)
   ├── tests/
   │   ├── integration_tests.rs      # 8 个端到端集成测试套件
-  │   └── server_gateway_test.rs    # 2 个服务端网关与生命周期测试
+  │   ├── server_gateway_test.rs    # 2 个服务端网关与生命周期测试
+  │   ├── snapshot_dedup_test.rs    # 4 个快照去重与保活心跳测试
+  │   └── phase5_verification_test.rs # 7 个全链路回归与性能基准验证测试
   ├── scripts/
-  │   ├── prelude.scm               # 16x16 Chunk 分块存储、ANSI 光栅化器与 HUD 构建器
+  │   ├── prelude.scm               # 16x16 Chunk 分块存储、ANSI RLE 光栅化器与 HUD 构建器
   │   └── main.scm                  # 地图生成、碰撞检测、战斗伤害、AI 与变频控制
   ├── build.sh                      # 本地跨平台打包脚本 (Linux / macOS)
   ├── build.ps1                     # 本地打包脚本 (Windows PowerShell)
-  └── docs/                         # 规范文档 (specification_3.0.0.md, agents_3.0.0.md)
+  └── docs/
+      ├── agent_developer_guide.md  # 游戏 (Scheme) 与前端 (HUD SDK) Agent 开发者综合指南
+      └── project/                  # 本项目（引擎宿主）开发文档
+          ├── specification_3.0.0.md # 引擎 3.0 架构与技术规范
+          ├── agents_3.0.0.md       # 引擎开发多智能体协作规范
+          └── todo.md               # 主循环优化与架构修复执行清单
 ```
 
 ---

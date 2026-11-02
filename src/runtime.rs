@@ -97,8 +97,42 @@ pub struct TextCraftServer {
     pub time_scale: f32,
     pub autosave_sec: u64,
     pub snapshot_heartbeat_ms: u64,
-    last_snapshots: HashMap<PlayerId, (u64, Instant)>,
+    last_snapshots: HashMap<PlayerId, (u64, Instant, u64, PlayerSnapshot)>,
     player_tokens: HashMap<PlayerId, String>,
+    last_reload_check: Option<Instant>,
+}
+
+fn hash_json_value<H: Hasher>(val: &serde_json::Value, state: &mut H) {
+    match val {
+        serde_json::Value::Null => 0u8.hash(state),
+        serde_json::Value::Bool(b) => {
+            1u8.hash(state);
+            b.hash(state);
+        }
+        serde_json::Value::Number(n) => {
+            2u8.hash(state);
+            n.hash(state);
+        }
+        serde_json::Value::String(s) => {
+            3u8.hash(state);
+            s.hash(state);
+        }
+        serde_json::Value::Array(arr) => {
+            4u8.hash(state);
+            arr.len().hash(state);
+            for item in arr {
+                hash_json_value(item, state);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            5u8.hash(state);
+            map.len().hash(state);
+            for (k, v) in map {
+                k.hash(state);
+                hash_json_value(v, state);
+            }
+        }
+    }
 }
 
 impl TextCraftServer {
@@ -146,6 +180,7 @@ impl TextCraftServer {
             snapshot_heartbeat_ms: 1000,
             last_snapshots: HashMap::new(),
             player_tokens: HashMap::new(),
+            last_reload_check: None,
         })
     }
 
@@ -162,8 +197,16 @@ impl TextCraftServer {
 
     /// Performs a single simulation tick: session events, inputs, tick advance, and snapshots.
     pub fn tick(&mut self, dt: f32) -> Result<(), Box<dyn std::error::Error>> {
-        // 1. Script hot reloading check
-        let _ = self.logic.check_reload();
+        let now = Instant::now();
+
+        // 1. Script hot reloading check (throttled to at most once per 500ms)
+        if self
+            .last_reload_check
+            .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(500))
+        {
+            let _ = self.logic.check_reload();
+            self.last_reload_check = Some(now);
+        }
 
         // 2. Consume session lifecycle events
         for event in self.handle.drain_session_events() {
@@ -184,16 +227,44 @@ impl TextCraftServer {
                         },
                     );
                 }
-                game_server::SessionEvent::PlayerDisconnected { player_id, .. }
-                | game_server::SessionEvent::PlayerTerminated { player_id } => {
+                game_server::SessionEvent::PlayerDisconnected {
+                    player_id,
+                    grace_period_secs,
+                } => {
+                    self.last_snapshots.remove(&player_id);
+                    tracing::info!(
+                        player_id,
+                        grace_period_secs,
+                        "Player disconnected, entering grace period"
+                    );
+                }
+                game_server::SessionEvent::PlayerReconnected { player_id } => {
+                    self.last_snapshots.remove(&player_id);
+                    if let Some(session) = self
+                        .handle
+                        .session_manager()
+                        .get_session_by_player(player_id)
+                    {
+                        self.player_tokens.insert(player_id, session.token);
+                    }
+                    self.handle.send_event(
+                        player_id,
+                        TextCraftEvent::Welcome {
+                            player_id,
+                            message: format!(
+                                "Welcome back to TextCraft 3.0! Reconnected as Player {}",
+                                player_id
+                            ),
+                        },
+                    );
+                    tracing::info!(player_id, "Player reconnected");
+                }
+                game_server::SessionEvent::PlayerTerminated { player_id } => {
                     self.player_tokens.remove(&player_id);
                     self.last_snapshots.remove(&player_id);
                     if let Err(e) = self.logic.on_player_leave(player_id) {
                         tracing::warn!(player_id, error = %e, "on_player_leave error");
                     }
-                }
-                game_server::SessionEvent::PlayerReconnected { player_id } => {
-                    tracing::info!(player_id, "Player reconnected");
                 }
             }
         }
@@ -243,30 +314,55 @@ impl TextCraftServer {
         }
 
         // 7. Render and broadcast snapshots for each online player
-        let now = Instant::now();
+        let current_ver = self.logic.visual_version();
         for pid in self.handle.connected_players() {
+            if self.snapshot_heartbeat_ms > 0 {
+                if let Some(&(_, last_sent, last_ver, _)) = self.last_snapshots.get(&pid) {
+                    if last_ver == current_ver {
+                        if now.duration_since(last_sent)
+                            >= Duration::from_millis(self.snapshot_heartbeat_ms)
+                        {
+                            if let Some(entry) = self.last_snapshots.get_mut(&pid) {
+                                entry.1 = now;
+                                let snap = entry.3.clone();
+                                self.handle.send_snapshot(pid, snap);
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+
             match self.logic.render_snapshot(pid) {
                 Ok(snapshot) => {
                     if self.snapshot_heartbeat_ms == 0 {
                         self.handle.send_snapshot(pid, snapshot);
                     } else {
                         let mut hasher = DefaultHasher::new();
+                        snapshot.cols.hash(&mut hasher);
+                        snapshot.rows.hash(&mut hasher);
                         snapshot.screen.hash(&mut hasher);
-                        snapshot.hud.to_string().hash(&mut hasher);
+                        hash_json_value(&snapshot.hud, &mut hasher);
                         let current_hash = hasher.finish();
 
+                        let now_after_render = Instant::now();
                         let should_send = match self.last_snapshots.get(&pid) {
                             None => true,
-                            Some(&(last_hash, last_sent)) => {
+                            Some(&(last_hash, last_sent, _, _)) => {
                                 current_hash != last_hash
-                                    || now.duration_since(last_sent)
+                                    || now_after_render.duration_since(last_sent)
                                         >= Duration::from_millis(self.snapshot_heartbeat_ms)
                             }
                         };
 
                         if should_send {
-                            self.last_snapshots.insert(pid, (current_hash, now));
+                            self.last_snapshots.insert(
+                                pid,
+                                (current_hash, now_after_render, current_ver, snapshot.clone()),
+                            );
                             self.handle.send_snapshot(pid, snapshot);
+                        } else if let Some(entry) = self.last_snapshots.get_mut(&pid) {
+                            entry.2 = current_ver;
                         }
                     }
                 }
@@ -292,36 +388,14 @@ impl TextCraftServer {
                     }
                 }
             }
-            PlayerInput::Key {
-                code,
-                shift,
-                ctrl,
-                alt,
-            } => {
-                let key_input = PlayerInput::Key {
-                    code,
-                    shift,
-                    ctrl,
-                    alt,
-                };
-                if let Err(e) = self.logic.on_input(pid, &key_input) {
+            PlayerInput::Key { .. } | PlayerInput::Mouse { .. } => {
+                if let Err(e) = self.logic.on_input(pid, &input) {
                     tracing::warn!(player_id = pid, error = %e, "on_input error");
                 }
             }
             PlayerInput::UIAction { action, payload } => {
                 if let Err(e) = self.logic.on_ui_action(pid, &action, &payload) {
                     tracing::warn!(player_id = pid, error = %e, "on_ui_action error");
-                }
-            }
-            PlayerInput::Mouse { x, y, button } => {
-                let mouse_val = serde_json::json!({
-                    "type": "mouse",
-                    "x": x,
-                    "y": y,
-                    "button": button,
-                });
-                if let Err(e) = self.logic.on_ui_action(pid, "mouse_click", &mouse_val) {
-                    tracing::debug!(player_id = pid, error = %e, "mouse action unhandled");
                 }
             }
         }
@@ -367,6 +441,9 @@ impl TextCraftServer {
             "TextCraft 3.0 Server running"
         );
 
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
+
         loop {
             let now = Instant::now();
             let elapsed = now.duration_since(last_tick_time);
@@ -398,7 +475,7 @@ impl TextCraftServer {
             let sleep_duration = tick_duration.saturating_sub(compute_duration);
 
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
+                _ = &mut ctrl_c => {
                     tracing::info!("Received Ctrl+C interrupt, shutting down server...");
                     break;
                 }
@@ -406,10 +483,7 @@ impl TextCraftServer {
             }
         }
 
-        // On server shutdown, save state
-        if let Err(e) = self.logic.save_state_to_file() {
-            tracing::error!(error = %e, "Failed to save state on shutdown");
-        }
+        // Shutdown networking; SchemeLogic::drop handles final state save
         self.handle.shutdown();
         Ok(())
     }
