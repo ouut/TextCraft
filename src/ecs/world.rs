@@ -1,5 +1,9 @@
 use flecs_ecs::prelude::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 use crate::ecs::components::*;
+use crate::ecs::fov::compute_fov;
+use crate::ecs::noise::{self, SimplexNoise};
+use crate::ecs::pathfinding;
 use crate::ecs::spatial::SpatialGrid;
 
 /// Central authoritative ECS World wrapping Flecs and maintaining the spatial index.
@@ -260,6 +264,71 @@ impl EcsWorld {
         Ok(results)
     }
 
+    /// Check whether coordinate `(x, y)` has any opaque entity.
+    #[inline]
+    pub fn is_opaque(&self, x: i32, y: i32) -> bool {
+        self.spatial.is_opaque(x, y)
+    }
+
+    /// Check whether coordinate `(x, y)` has any solid entity.
+    #[inline]
+    pub fn is_solid(&self, x: i32, y: i32) -> bool {
+        self.spatial.is_solid(x, y)
+    }
+
+    /// Check whether coordinate `(x, y)` is passable (no solid entities).
+    #[inline]
+    pub fn is_passable(&self, x: i32, y: i32) -> bool {
+        self.spatial.is_passable(x, y)
+    }
+
+    /// Compute field of view from `(cx, cy)` within `radius` using Symmetric Recursive Shadowcasting.
+    pub fn fov(&self, cx: i32, cy: i32, radius: i32) -> FxHashSet<(i32, i32)> {
+        compute_fov(cx, cy, radius, |x, y| self.is_opaque(x, y))
+    }
+
+    /// Find shortest path from `start` to `goal` using A* grid pathfinding.
+    pub fn find_path(
+        &self,
+        start: (i32, i32),
+        goal: (i32, i32),
+        allow_diagonal: bool,
+    ) -> Option<Vec<(i32, i32)>> {
+        pathfinding::find_path(start, goal, allow_diagonal, |x, y| {
+            (x == start.0 && y == start.1) || self.is_passable(x, y)
+        })
+    }
+
+    /// Generate Dijkstra flow field / distance field radiating from `target` up to `max_distance`.
+    pub fn dijkstra_map(
+        &self,
+        target: (i32, i32),
+        max_distance: u32,
+        allow_diagonal: bool,
+    ) -> FxHashMap<(i32, i32), u32> {
+        pathfinding::dijkstra_map(target, max_distance, allow_diagonal, |x, y| {
+            (x == target.0 && y == target.1) || self.is_passable(x, y)
+        })
+    }
+
+    /// Sample 2D simplex noise at `(x, y)` with frequency scaling `scale`.
+    pub fn noise_2d(seed: u64, x: f64, y: f64, scale: f64) -> f64 {
+        let noise = SimplexNoise::new(seed);
+        let s = if scale == 0.0 { 1.0 } else { scale };
+        noise.sample_2d(x * s, y * s)
+    }
+
+    /// Generate a 2D cellular automata cave grid with standard 4-5 rule.
+    pub fn generate_cave(
+        width: usize,
+        height: usize,
+        wall_prob: f64,
+        iterations: usize,
+        seed: u64,
+    ) -> Vec<Vec<bool>> {
+        noise::generate_cave(width, height, wall_prob, iterations, seed)
+    }
+
     /// Progress world simulation by `delta_time` seconds.
     pub fn progress(&mut self, delta_time: f32) -> bool {
         self.world.progress_time(delta_time)
@@ -357,5 +426,59 @@ mod tests {
         assert_eq!(monsters.len(), 2);
         assert!(monsters.contains(&m1));
         assert!(monsters.contains(&m2));
+    }
+
+    #[test]
+    fn test_ecs_world_math_operators() {
+        let mut ecs = EcsWorld::new();
+
+        // Spawn a player at (5, 5)
+        let player = ecs.spawn_named("Hero");
+        ecs.set_pos(player, 5, 5, LAYER_CREATURE);
+        ecs.set_glyph(player, '@', None, None, true, false);
+
+        // Spawn a solid, opaque wall at (5, 4)
+        let wall = ecs.spawn_named("Wall");
+        ecs.set_pos(wall, 5, 4, LAYER_TERRAIN);
+        ecs.set_glyph(wall, '#', None, None, true, true);
+
+        // Test passability and opacity
+        assert!(ecs.is_solid(5, 4));
+        assert!(ecs.is_opaque(5, 4));
+        assert!(!ecs.is_passable(5, 4));
+
+        assert!(ecs.is_passable(6, 5));
+        assert!(!ecs.is_opaque(6, 5));
+
+        // Test FOV: wall at (5, 4) is visible, but (5, 3) directly behind it is blocked
+        let fov = ecs.fov(5, 5, 4);
+        assert!(fov.contains(&(5, 5)));
+        assert!(fov.contains(&(5, 4))); // Wall itself is visible
+        assert!(!fov.contains(&(5, 3))); // Occluded by wall
+        assert!(fov.contains(&(6, 5))); // Open tile visible
+
+        // Test A* pathfinding around the wall from (5, 5) to (5, 3)
+        let path = ecs.find_path((5, 5), (5, 3), false).unwrap();
+        assert_eq!(*path.first().unwrap(), (5, 5));
+        assert_eq!(*path.last().unwrap(), (5, 3));
+        assert!(!path.contains(&(5, 4)), "Path should not pass through wall");
+
+        // Test Dijkstra map
+        let dmap = ecs.dijkstra_map((5, 5), 3, false);
+        assert_eq!(dmap.get(&(5, 5)), Some(&0));
+        assert_eq!(dmap.get(&(5, 4)), None); // Solid wall excluded
+        assert_eq!(dmap.get(&(6, 5)), Some(&1));
+
+        // Test noise
+        let n1 = EcsWorld::noise_2d(42, 10.0, 20.0, 0.1);
+        let n2 = EcsWorld::noise_2d(42, 10.0, 20.0, 0.1);
+        assert_eq!(n1, n2);
+        assert!((-1.0..=1.0).contains(&n1));
+
+        // Test cave generator
+        let cave = EcsWorld::generate_cave(20, 15, 0.45, 4, 1234);
+        assert_eq!(cave.len(), 15);
+        assert_eq!(cave[0].len(), 20);
+        assert!(cave[0][0]); // Perimeter wall
     }
 }

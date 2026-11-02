@@ -177,6 +177,28 @@ impl SpatialGrid {
         self.cells.values().map(|v| v.len()).sum()
     }
 
+    /// Check whether coordinate `(x, y)` has any opaque entity.
+    #[inline]
+    pub fn is_opaque(&self, x: i32, y: i32) -> bool {
+        self.at(x, y)
+            .iter()
+            .any(|e| e.glyph.map_or(false, |g| g.opaque))
+    }
+
+    /// Check whether coordinate `(x, y)` has any solid entity.
+    #[inline]
+    pub fn is_solid(&self, x: i32, y: i32) -> bool {
+        self.at(x, y)
+            .iter()
+            .any(|e| e.glyph.map_or(false, |g| g.solid))
+    }
+
+    /// Check whether coordinate `(x, y)` is passable (no solid entities).
+    #[inline]
+    pub fn is_passable(&self, x: i32, y: i32) -> bool {
+        !self.is_solid(x, y)
+    }
+
     /// Clear all cells.
     pub fn clear(&mut self) {
         self.cells.clear();
