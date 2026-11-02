@@ -28,7 +28,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 rand = "0.8"
+rustc-hash = "2.1"
+flecs_ecs = { git = "https://github.com/Indra-db/Flecs-Rust", branch = "main" }
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+criterion = "0.5"
+
+[[bench]]
+name = "rasterizer"
+harness = false

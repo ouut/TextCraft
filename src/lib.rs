@@ -1,3 +1,4 @@
+pub mod ecs;
 pub mod logic;
 pub mod runtime;
 pub mod types;
