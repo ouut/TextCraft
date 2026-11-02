@@ -733,6 +733,127 @@ impl TextCraftServer {
                     "properties": {}
                 }
             }),
+            serde_json::json!({
+                "name": "ecs_inspect",
+                "description": "Inspect detailed Flecs ECS state of an entity by its numeric ID (`eid`), including name, coordinates, glyph, tags, dynamic properties, relationships (e.g. PartOf, EquippedOn), and PlayerSession. Optionally apply modifications if `modify` is provided.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "eid": {
+                            "type": "integer",
+                            "description": "Entity ID to inspect"
+                        },
+                        "modify": {
+                            "type": "object",
+                            "description": "Optional patch object to modify the entity (set_props, delete_props, add_tags, remove_tags, set_pos, set_glyph, relate, unrelate, despawn)"
+                        }
+                    },
+                    "required": ["eid"]
+                }
+            }),
+            serde_json::json!({
+                "name": "ecs_query",
+                "description": "Query ECS entities using Flecs DSL expression (e.g. 'GridPos, Monster', 'Liquid', 'Item, !Dead'). Returns matching entities with their full inspected state up to `limit`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Flecs query DSL expression (e.g. 'GridPos, Monster', 'Liquid', 'Floor')"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of entity details to return (default: 50)"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }),
+            serde_json::json!({
+                "name": "ecs_modify",
+                "description": "Modify an ECS entity's state: set dynamic properties, add/remove tags, update position/glyph, manage relationships, or despawn.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "eid": {
+                            "type": "integer",
+                            "description": "Target entity ID"
+                        },
+                        "set_props": {
+                            "type": "object",
+                            "description": "Key-value map of dynamic properties to set/update"
+                        },
+                        "delete_props": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Array of dynamic property keys to remove"
+                        },
+                        "add_tags": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Array of string tag names to add"
+                        },
+                        "remove_tags": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Array of string tag names to remove"
+                        },
+                        "set_pos": {
+                            "type": "object",
+                            "properties": {
+                                "x": { "type": "integer" },
+                                "y": { "type": "integer" },
+                                "layer": { "type": "integer" }
+                            },
+                            "required": ["x", "y"],
+                            "description": "Set spatial coordinates"
+                        },
+                        "set_glyph": {
+                            "type": "object",
+                            "description": "Visual glyph update (char, fg, bg, solid, opaque)"
+                        },
+                        "set_player_session": {
+                            "type": "object",
+                            "properties": {
+                                "player_id": { "type": "integer" },
+                                "viewport_cols": { "type": "integer" },
+                                "viewport_rows": { "type": "integer" }
+                            },
+                            "required": ["player_id"],
+                            "description": "Bind player session to this entity"
+                        },
+                        "relate": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "relation": { "type": "string" },
+                                    "target": { "type": "integer" }
+                                },
+                                "required": ["relation", "target"]
+                            },
+                            "description": "Relationships to add"
+                        },
+                        "unrelate": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "relation": { "type": "string" },
+                                    "target": { "type": "integer" }
+                                },
+                                "required": ["relation", "target"]
+                            },
+                            "description": "Relationships to remove"
+                        },
+                        "despawn": {
+                            "type": "boolean",
+                            "description": "If true, despawn this entity"
+                        }
+                    },
+                    "required": ["eid"]
+                }
+            }),
         ]
     }
 
@@ -947,6 +1068,77 @@ impl TextCraftServer {
                 Ok(()) => ("Reloaded successfully".to_string(), false),
                 Err(err) => (err, true),
             },
+            "ecs_inspect" => {
+                let Some(eid) = arguments.get("eid").and_then(|v| v.as_u64()) else {
+                    return ("Missing required integer parameter 'eid'".to_string(), true);
+                };
+                let ecs = self.logic.ecs_world();
+                let mut guard = ecs.lock();
+                if let Some(patch) = arguments.get("modify") {
+                    if patch.is_object() {
+                        match guard.modify_entity(eid, patch) {
+                            Ok(res) => {
+                                drop(guard);
+                                self.logic.increment_extra_version();
+                                (
+                                    serde_json::to_string_pretty(&res)
+                                        .unwrap_or_else(|_| res.to_string()),
+                                    false,
+                                )
+                            }
+                            Err(err) => (err, true),
+                        }
+                    } else {
+                        ("Parameter 'modify' must be an object".to_string(), true)
+                    }
+                } else {
+                    match guard.inspect_entity(eid) {
+                        Some(res) => (
+                            serde_json::to_string_pretty(&res)
+                                .unwrap_or_else(|_| res.to_string()),
+                            false,
+                        ),
+                        None => (format!("Entity {} does not exist", eid), true),
+                    }
+                }
+            }
+            "ecs_query" => {
+                let Some(query_str) = arguments.get("query").and_then(|v| v.as_str()) else {
+                    return ("Missing required string parameter 'query'".to_string(), true);
+                };
+                let limit = arguments
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(50) as usize;
+                let ecs = self.logic.ecs_world();
+                let guard = ecs.lock();
+                match guard.query_entities(query_str, limit) {
+                    Ok(res) => (
+                        serde_json::to_string_pretty(&res).unwrap_or_else(|_| res.to_string()),
+                        false,
+                    ),
+                    Err(err) => (err, true),
+                }
+            }
+            "ecs_modify" => {
+                let Some(eid) = arguments.get("eid").and_then(|v| v.as_u64()) else {
+                    return ("Missing required integer parameter 'eid'".to_string(), true);
+                };
+                let ecs = self.logic.ecs_world();
+                let mut guard = ecs.lock();
+                match guard.modify_entity(eid, arguments) {
+                    Ok(res) => {
+                        drop(guard);
+                        self.logic.increment_extra_version();
+                        (
+                            serde_json::to_string_pretty(&res)
+                                .unwrap_or_else(|_| res.to_string()),
+                            false,
+                        )
+                    }
+                    Err(err) => (err, true),
+                }
+            }
             _ => match self.logic.mcp_call_tool(name, arguments) {
                 Ok(val) => {
                     let is_err = val

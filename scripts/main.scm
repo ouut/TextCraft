@@ -254,9 +254,80 @@
           (set-player pid p)
           (touch-activity!)
           (player:add-log pid "system" "已成功连接至 TextCraft 3.0 纯 Scheme 虚拟世界！")
-          'ok))))
+          'ok)))
+
+    ;; Sync Player entity to Flecs ECS
+    (let* ((cur-p (ensure-player pid))
+           (px (map-get cur-p "x" 0))
+           (py (map-get cur-p "y" 0))
+           (all-players (ecs:query "Player"))
+           (peid (let loop-find ((ps all-players))
+                   (if (null? ps)
+                       #f
+                       (let* ((cand (car ps))
+                              (cand-pid (ecs:get cand "player_id" #f)))
+                         (if (and cand-pid (= cand-pid pid))
+                             cand
+                             (loop-find (cdr ps))))))))
+      (let ((actual-eid (if (not peid)
+                            (let ((e (ecs:spawn-named (string-append "Player_" (to-string pid)))))
+                              (ecs:set-pos e px py LAYER-CREATURE)
+                              (ecs:set-glyph e "@" '(100 200 255) #f #t #f)
+                              (ecs:set-player-session e pid 80 24)
+                              e)
+                            peid)))
+        (ecs:set-pos actual-eid px py LAYER-CREATURE)
+        (ecs:set-glyph actual-eid "@" '(100 200 255) #f #t #f)
+        (ecs:set actual-eid "player_id" pid)
+        (ecs:set actual-eid "name" (map-get cur-p "name" "Hero"))
+        (ecs:set actual-eid "hp" (map-get cur-p "hp" 100))
+        (ecs:set actual-eid "max_hp" (map-get cur-p "max_hp" 100))))
+    'ok)
+
+(define (engine:on-player-disconnect pid)
+  (let ((p (get-player pid)))
+    (if p
+        (set-player pid (hash-insert p "online" #f))
+        #f))
+  ;; Despawn from Flecs ECS while disconnected (ghost filtering)
+  (let ((peids (ecs:query "Player")))
+    (for-each
+      (lambda (eid)
+        (let ((pid-val (ecs:get eid "player_id" #f)))
+          (if (and pid-val (= pid-val pid))
+              (ecs:despawn eid)
+              #f)))
+      peids))
+  'ok)
+
+(define (engine:on-player-reconnect pid)
+  (let ((p (get-player pid)))
+    (if p
+        (set-player pid (hash-insert p "online" #t))
+        #f))
+  ;; Re-spawn player into Flecs ECS upon reconnect
+  (let* ((p (ensure-player pid))
+         (px (map-get p "x" 0))
+         (py (map-get p "y" 0))
+         (eid (ecs:spawn-named (string-append "Player_" (to-string pid)))))
+    (ecs:set-pos eid px py LAYER-CREATURE)
+    (ecs:set-glyph eid "@" '(100 200 255) #f #t #f)
+    (ecs:set-player-session eid pid 80 24)
+    (ecs:set eid "player_id" pid)
+    (ecs:set eid "name" (map-get p "name" "Hero"))
+    (ecs:set eid "hp" (map-get p "hp" 100))
+    (ecs:set eid "max_hp" (map-get p "max_hp" 100))
+    'ok))
 
 (define (engine:on-player-leave pid)
+  (let ((peids (ecs:query "Player")))
+    (for-each
+      (lambda (eid)
+        (let ((pid-val (ecs:get eid "player_id" #f)))
+          (if (and pid-val (= pid-val pid))
+              (ecs:despawn eid)
+              #f)))
+      peids))
   (remove-player pid)
   'ok)
 
@@ -278,6 +349,11 @@
       ((> new-idle 5.0) (set-target-fps! 15))
       ((> new-idle 2.0) (set-target-fps! 30))
       (else #f))
+
+    ;; Environmental chemistry tick (liquid decay, fire spread, burns) every ~30 ticks
+    (if (= (modulo (+ old-ticks 1) 30) 0)
+        (chemistry:tick-environment)
+        #f)
 
     ;; Monster AI execution every ~30 ticks
     (if (= (modulo (+ old-ticks 1) 30) 0)
@@ -508,6 +584,14 @@
                   (else
                    (let ((p2 (hash-insert (hash-insert p "x" nx) "y" ny)))
                      (set-player pid p2)
+                     (let ((peids (ecs:query "Player")))
+                       (for-each
+                         (lambda (eid)
+                           (let ((pid-val (ecs:get eid "player_id" #f)))
+                             (if (or (not pid-val) (= pid-val pid))
+                                 (ecs:set-pos eid nx ny LAYER-CREATURE)
+                                 #f)))
+                         peids))
                      ;; Check pickups on the new tile surface
                      (if surface-tile
                          (let ((sname (map-get surface-tile "name" ""))

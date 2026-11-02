@@ -168,6 +168,27 @@ impl EcsWorld {
             .and_then(|p| p.get(key).cloned())
     }
 
+    /// Remove a dynamic property from an entity.
+    pub fn delete_prop(&mut self, eid: u64, key: &str) -> bool {
+        if !self.exists(eid) {
+            return false;
+        }
+        let ent = self.world.entity_from_id(eid);
+        if let Some(mut props) = ent.cloned::<Option<&DynamicProps>>() {
+            let removed = props.remove(key).is_some();
+            ent.set(props);
+            removed
+        } else {
+            false
+        }
+    }
+
+    /// Clear all entities and reset spatial grid.
+    pub fn clear(&mut self) {
+        let mut new_world = Self::new();
+        std::mem::swap(self, &mut new_world);
+    }
+
     /// Check whether an entity has a specific dynamic property.
     pub fn has_prop(&self, eid: u64, key: &str) -> bool {
         if !self.exists(eid) {
@@ -183,6 +204,12 @@ impl EcsWorld {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.spatial.is_empty()
+    }
+
+    /// Return the count of entities indexed in the spatial grid across all layers.
+    #[inline]
+    pub fn count(&self) -> usize {
+        self.spatial.total_entries()
     }
 
     /// Add a tag (named entity) to an entity.
@@ -273,12 +300,249 @@ impl EcsWorld {
 
     /// Execute a Flecs C query DSL string (e.g. "GridPos, Monster, !Dead").
     pub fn query_expr(&self, expr: &str) -> Result<Vec<u64>, String> {
+        let mut builder = self.world.query::<()>();
+        builder.expr(expr);
+        let Some(query) = builder.try_build() else {
+            return Err(format!("Invalid query expression: {}", expr));
+        };
         let mut results = Vec::new();
-        let query = self.world.query::<()>().expr(expr).build();
         query.each_entity(|e, _| {
             results.push(*e.id());
         });
         Ok(results)
+    }
+
+    /// Detailed introspection of an entity by ID, including coordinates, glyph, tags, props, and relationships.
+    pub fn inspect_entity(&self, eid: u64) -> Option<serde_json::Value> {
+        if !self.exists(eid) {
+            return None;
+        }
+        let ent = self.world.entity_from_id(eid);
+        let name = ent.get_name();
+        let pos = self.get_pos(eid);
+        let glyph = self.get_glyph(eid);
+
+        let dynamic_props = ent
+            .cloned::<Option<&DynamicProps>>()
+            .map(|dp| dp.values.clone());
+
+        let player_session = ent
+            .cloned::<Option<&PlayerSession>>()
+            .map(|ps| serde_json::json!({
+                "player_id": ps.player_id,
+                "viewport_cols": ps.viewport_cols,
+                "viewport_rows": ps.viewport_rows,
+            }));
+
+        let mut tags = Vec::new();
+        let mut relationships = Vec::new();
+
+        ent.each_component(|id| {
+            if id.is_pair() {
+                let rel_name = id.get_first_id().map(|e| e.name()).unwrap_or_default();
+                let tgt_id = id.get_second_id().map(|e| *e.id()).unwrap_or(0);
+                let tgt_name = id.get_second_id().and_then(|e| e.get_name());
+                relationships.push(serde_json::json!({
+                    "relation": rel_name,
+                    "target_id": tgt_id,
+                    "target_name": tgt_name,
+                }));
+            } else if let Some(view) = id.get_entity_view() {
+                let tname = view.name();
+                if !tname.is_empty() {
+                    tags.push(tname);
+                }
+            }
+        });
+
+        Some(serde_json::json!({
+            "id": eid,
+            "name": name,
+            "exists": true,
+            "position": pos.map(|p| serde_json::json!({
+                "x": p.x,
+                "y": p.y,
+                "layer": p.layer,
+            })),
+            "glyph": glyph.map(|g| serde_json::json!({
+                "char": g.ch.to_string(),
+                "fg": g.fg.map(|c| [c.r, c.g, c.b]),
+                "bg": g.bg.map(|c| [c.r, c.g, c.b]),
+                "solid": g.solid,
+                "opaque": g.opaque,
+            })),
+            "dynamic_props": dynamic_props,
+            "player_session": player_session,
+            "tags": tags,
+            "relationships": relationships,
+        }))
+    }
+
+    /// Query matching entities and return their inspected state up to `limit`.
+    pub fn query_entities(&self, expr: &str, limit: usize) -> Result<serde_json::Value, String> {
+        let eids = self.query_expr(expr)?;
+        let total = eids.len();
+        let limited_entities: Vec<serde_json::Value> = eids
+            .into_iter()
+            .take(limit)
+            .filter_map(|eid| self.inspect_entity(eid))
+            .collect();
+
+        Ok(serde_json::json!({
+            "query": expr,
+            "total_matches": total,
+            "count": limited_entities.len(),
+            "entities": limited_entities,
+        }))
+    }
+
+    /// Modify an entity with a patch JSON object (props, tags, pos, glyph, relations, player session, despawn).
+    pub fn modify_entity(
+        &mut self,
+        eid: u64,
+        patch: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        if !self.exists(eid) {
+            return Err(format!("Entity {} does not exist", eid));
+        }
+
+        // Check for despawn
+        if patch.get("despawn").and_then(|v| v.as_bool()).unwrap_or(false) {
+            self.despawn(eid);
+            return Ok(serde_json::json!({
+                "id": eid,
+                "despawned": true,
+            }));
+        }
+
+        // Dynamic props to set
+        if let Some(props) = patch.get("set_props").and_then(|v| v.as_object()) {
+            for (k, v) in props {
+                self.set_prop(eid, k, v.clone());
+            }
+        }
+
+        // Dynamic props to delete
+        if let Some(del_keys) = patch.get("delete_props").and_then(|v| v.as_array()) {
+            for k in del_keys {
+                if let Some(key_str) = k.as_str() {
+                    self.delete_prop(eid, key_str);
+                }
+            }
+        }
+
+        // Tags to add
+        if let Some(add_tags) = patch.get("add_tags").and_then(|v| v.as_array()) {
+            for tag in add_tags {
+                if let Some(tag_str) = tag.as_str() {
+                    self.add_tag(eid, tag_str);
+                }
+            }
+        }
+
+        // Tags to remove
+        if let Some(rem_tags) = patch.get("remove_tags").and_then(|v| v.as_array()) {
+            for tag in rem_tags {
+                if let Some(tag_str) = tag.as_str() {
+                    self.remove_tag(eid, tag_str);
+                }
+            }
+        }
+
+        // Position update
+        if let Some(pos_obj) = patch.get("set_pos").and_then(|v| v.as_object()) {
+            if let (Some(x), Some(y)) = (
+                pos_obj.get("x").and_then(|v| v.as_i64()),
+                pos_obj.get("y").and_then(|v| v.as_i64()),
+            ) {
+                let layer = pos_obj
+                    .get("layer")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u8)
+                    .or_else(|| self.get_pos(eid).map(|p| p.layer))
+                    .unwrap_or(LAYER_CREATURE);
+                self.set_pos(eid, x as i32, y as i32, layer);
+            }
+        }
+
+        // Glyph update
+        if let Some(g_obj) = patch.get("set_glyph").and_then(|v| v.as_object()) {
+            let ch = g_obj
+                .get("char")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.chars().next())
+                .unwrap_or('?');
+            let fg = g_obj.get("fg").and_then(|v| v.as_array()).and_then(|arr| {
+                if arr.len() >= 3 {
+                    Some(Color::rgb(
+                        arr[0].as_u64().unwrap_or(255) as u8,
+                        arr[1].as_u64().unwrap_or(255) as u8,
+                        arr[2].as_u64().unwrap_or(255) as u8,
+                    ))
+                } else {
+                    None
+                }
+            });
+            let bg = g_obj.get("bg").and_then(|v| v.as_array()).and_then(|arr| {
+                if arr.len() >= 3 {
+                    Some(Color::rgb(
+                        arr[0].as_u64().unwrap_or(0) as u8,
+                        arr[1].as_u64().unwrap_or(0) as u8,
+                        arr[2].as_u64().unwrap_or(0) as u8,
+                    ))
+                } else {
+                    None
+                }
+            });
+            let solid = g_obj.get("solid").and_then(|v| v.as_bool()).unwrap_or(false);
+            let opaque = g_obj.get("opaque").and_then(|v| v.as_bool()).unwrap_or(false);
+            self.set_glyph(eid, ch, fg, bg, solid, opaque);
+        }
+
+        // Player session update
+        if let Some(ps_obj) = patch.get("set_player_session").and_then(|v| v.as_object()) {
+            if let Some(pid) = ps_obj.get("player_id").and_then(|v| v.as_u64()) {
+                let cols = ps_obj
+                    .get("viewport_cols")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(80) as u16;
+                let rows = ps_obj
+                    .get("viewport_rows")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(24) as u16;
+                self.world
+                    .entity_from_id(eid)
+                    .set(PlayerSession::new(pid, cols, rows));
+                self.add_tag(eid, "Player");
+            }
+        }
+
+        // Relate
+        if let Some(rel_arr) = patch.get("relate").and_then(|v| v.as_array()) {
+            for item in rel_arr {
+                if let (Some(rel), Some(tgt)) = (
+                    item.get("relation").and_then(|v| v.as_str()),
+                    item.get("target").and_then(|v| v.as_u64()),
+                ) {
+                    self.relate(eid, rel, tgt);
+                }
+            }
+        }
+
+        // Unrelate
+        if let Some(unrel_arr) = patch.get("unrelate").and_then(|v| v.as_array()) {
+            for item in unrel_arr {
+                if let (Some(rel), Some(tgt)) = (
+                    item.get("relation").and_then(|v| v.as_str()),
+                    item.get("target").and_then(|v| v.as_u64()),
+                ) {
+                    self.unrelate(eid, rel, tgt);
+                }
+            }
+        }
+
+        self.inspect_entity(eid)
+            .ok_or_else(|| format!("Entity {} disappeared after modification", eid))
     }
 
     /// Check whether coordinate `(x, y)` has any opaque entity.
@@ -500,5 +764,47 @@ mod tests {
         assert_eq!(cave.len(), 15);
         assert_eq!(cave[0].len(), 20);
         assert!(cave[0][0]); // Perimeter wall
+    }
+
+    #[test]
+    fn test_ecs_inspect_query_modify() {
+        let mut ecs = EcsWorld::new();
+
+        let goblin = ecs.spawn_named("Goblin_Grunt");
+        ecs.set_pos(goblin, 12, 8, LAYER_CREATURE);
+        ecs.set_glyph(goblin, 'g', Some(Color::rgb(100, 200, 100)), None, true, false);
+        ecs.add_tag(goblin, "Monster");
+        ecs.set_prop(goblin, "hp", serde_json::json!(45));
+
+        // 1. Inspect
+        let ins = ecs.inspect_entity(goblin).expect("Goblin should exist");
+        assert_eq!(ins["name"], "Goblin_Grunt");
+        assert_eq!(ins["position"]["x"], 12);
+        assert_eq!(ins["position"]["y"], 8);
+        assert_eq!(ins["glyph"]["char"], "g");
+        assert_eq!(ins["dynamic_props"]["hp"], 45);
+        assert!(ins["tags"].as_array().unwrap().iter().any(|t| t == "Monster"));
+
+        // 2. Query
+        let q_res = ecs.query_entities("Monster", 10).unwrap();
+        assert_eq!(q_res["total_matches"], 1);
+        assert_eq!(q_res["entities"][0]["name"], "Goblin_Grunt");
+
+        // 3. Modify
+        let patch = serde_json::json!({
+            "set_props": { "hp": 30, "status": "poisoned" },
+            "add_tags": ["Poisoned"],
+            "set_pos": { "x": 13, "y": 8 }
+        });
+        let mod_res = ecs.modify_entity(goblin, &patch).unwrap();
+        assert_eq!(mod_res["position"]["x"], 13);
+        assert_eq!(mod_res["dynamic_props"]["hp"], 30);
+        assert_eq!(mod_res["dynamic_props"]["status"], "poisoned");
+        assert!(mod_res["tags"].as_array().unwrap().iter().any(|t| t == "Poisoned"));
+
+        // 4. Clear
+        ecs.clear();
+        assert_eq!(ecs.count(), 0);
+        assert!(ecs.inspect_entity(goblin).is_none());
     }
 }

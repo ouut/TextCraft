@@ -75,7 +75,25 @@
     "timers" (hash)))
 
 ;; ----------------------------------------------------------------------------
-;; 16x16 Chunked World Storage
+;; Standard ECS Layer Constants
+;; ----------------------------------------------------------------------------
+
+(define LAYER-TERRAIN 0)
+(define LAYER-ITEM-LIQUID 1)
+(define LAYER-CREATURE 2)
+(define LAYER-OVERLAY 3)
+
+(define (world:layer->layer-num layer)
+  (cond
+    ((equal? layer 'terrain) LAYER-TERRAIN)
+    ((equal? layer 'surface) LAYER-ITEM-LIQUID)
+    ((equal? layer 'actor) LAYER-CREATURE)
+    ((equal? layer 'overlay) LAYER-OVERLAY)
+    ((number? layer) layer)
+    (else LAYER-TERRAIN)))
+
+;; ----------------------------------------------------------------------------
+;; 16x16 Chunked World Storage (Synchronized with Flecs ECS)
 ;; ----------------------------------------------------------------------------
 
 (define (world:ensure-chunks)
@@ -96,6 +114,25 @@
          (new-chunk (hash-insert chunk "tiles" new-tiles))
          (new-chunks (hash-insert chunks ckey new-chunk)))
     (set! *world-state* (hash-insert *world-state* "chunks" new-chunks))
+    ;; Synchronize into Flecs ECS
+    (let* ((lnum (world:layer->layer-num layer))
+           (glyph (map-get tile-map "glyph" " "))
+           (fg (map-get tile-map "fg" #f))
+           (bg (map-get tile-map "bg" #f))
+           (solid (map-get tile-map "solid" #f))
+           (opaque (map-get tile-map "opaque" #f))
+           (name (map-get tile-map "name" "tile"))
+           (existing (ecs:at x y lnum))
+           (eid (if (null? existing)
+                    (let ((e (ecs:spawn-named name)))
+                      (ecs:set-pos e x y lnum)
+                      e)
+                    (car existing))))
+      (ecs:set-glyph eid glyph fg bg solid opaque)
+      (if solid (ecs:add-tag eid "Solid") #f)
+      (if (equal? layer 'terrain) (ecs:add-tag eid "Terrain") #f)
+      (if (equal? layer 'actor) (ecs:add-tag eid "Monster") #f)
+      (if (equal? layer 'surface) (ecs:add-tag eid "Item") #f))
     (bump-visual-version!)
     tile-map))
 
@@ -124,6 +161,9 @@
                      (new-chunk (hash-insert chunk "tiles" new-tiles))
                      (new-chunks (hash-insert chunks ckey new-chunk)))
                 (set! *world-state* (hash-insert *world-state* "chunks" new-chunks))
+                ;; Despawn from Flecs ECS
+                (let ((lnum (world:layer->layer-num layer)))
+                  (for-each ecs:despawn (ecs:at x y lnum)))
                 (bump-visual-version!)
                 #t)
               #f))
@@ -134,7 +174,13 @@
     (hash-insert
       (hash-insert *world-state* "chunks" (hash))
       "monsters" '()))
+  (ecs:clear!)
   (bump-visual-version!))
+
+(define (ecs:set-player-session eid pid . rest)
+  (let ((cols (if (null? rest) 80 (car rest)))
+        (rows (if (or (null? rest) (null? (cdr rest))) 24 (cadr rest))))
+    (__ecs:set-player-session eid pid cols rows)))
 
 ;; ----------------------------------------------------------------------------
 ;; Identity & Player State Helpers
@@ -509,12 +555,6 @@
 ;; ============================================================================
 ;; Flecs ECS DSL & Idiomatic Scheme Wrappers (TextCraft 4.0)
 ;; ============================================================================
-
-;; Standard ECS Layer Constants
-(define LAYER-TERRAIN 0)
-(define LAYER-ITEM-LIQUID 1)
-(define LAYER-CREATURE 2)
-(define LAYER-OVERLAY 3)
 
 ;; ----------------------------------------------------------------------------
 ;; define-entity & spawn-entity macros

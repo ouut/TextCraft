@@ -421,6 +421,56 @@ pub fn register_ecs_primitives(
         e24.lock().spatial.len() as isize
     });
 
+    let e_clear = Arc::clone(&ecs);
+    engine.register_fn("ecs:clear!", move || -> bool {
+        e_clear.lock().clear();
+        true
+    });
+
+    let e_inspect = Arc::clone(&ecs);
+    engine.register_fn("ecs:inspect", move |eid: SteelVal| -> SteelVal {
+        let eid_num = match eid {
+            SteelVal::IntV(n) => n as u64,
+            SteelVal::NumV(f) => f as u64,
+            _ => return SteelVal::BoolV(false),
+        };
+        match e_inspect.lock().inspect_entity(eid_num) {
+            Some(json) => json_to_steel_val(&json),
+            None => SteelVal::BoolV(false),
+        }
+    });
+
+    let e_sess = Arc::clone(&ecs);
+    engine.register_fn(
+        "__ecs:set-player-session",
+        move |eid: SteelVal, pid: SteelVal, cols: isize, rows: isize| -> bool {
+            let eid_num = match eid {
+                SteelVal::IntV(n) => n as u64,
+                SteelVal::NumV(f) => f as u64,
+                _ => return false,
+            };
+            let pid_num = match pid {
+                SteelVal::IntV(n) => n as u64,
+                SteelVal::NumV(f) => f as u64,
+                _ => return false,
+            };
+            let mut guard = e_sess.lock();
+            if !guard.exists(eid_num) {
+                return false;
+            }
+            guard
+                .world
+                .entity_from_id(eid_num)
+                .set(crate::ecs::components::PlayerSession::new(
+                    pid_num,
+                    cols as u16,
+                    rows as u16,
+                ));
+            guard.add_tag(eid_num, "Player");
+            true
+        },
+    );
+
     // ------------------------------------------------------------------------
     // 6. Roguelike Universal Mathematical Operators (FOV, A*, Dijkstra, Noise)
     // ------------------------------------------------------------------------
@@ -510,6 +560,9 @@ pub fn register_ecs_primitives(
       (case-lambda
         (() (__ecs:spawn))
         ((name) (__ecs:spawn-named (if (symbol? name) (symbol->string name) (to-string name))))))
+
+    (define (ecs:spawn-named name)
+      (__ecs:spawn-named (if (symbol? name) (symbol->string name) (to-string name))))
 
     (define ecs:get
       (case-lambda

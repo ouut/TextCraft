@@ -236,6 +236,7 @@ impl SchemeLogic {
 
     /// Advance game tick `(engine:on-tick dt tick-id)`.
     pub fn on_tick(&mut self, dt: f32, tick_id: u64) -> Result<(), String> {
+        self.ecs_world.lock().progress(dt);
         let args = vec![
             SteelVal::NumV(dt as f64),
             SteelVal::IntV(tick_id as isize),
@@ -441,6 +442,11 @@ impl SchemeLogic {
             _ => 0,
         };
         base.wrapping_add(self.extra_version)
+    }
+
+    /// Explicitly increment the extra visual version to trigger snapshot re-rendering.
+    pub fn increment_extra_version(&mut self) {
+        self.extra_version = self.extra_version.wrapping_add(1);
     }
 
     /// Evaluate expression in REPL style with watchdog timeout.

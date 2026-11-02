@@ -48,6 +48,12 @@ impl SpatialGrid {
         self.cells.len()
     }
 
+    /// Return the total count of spatial entries across all coordinates and layers.
+    #[inline]
+    pub fn total_entries(&self) -> usize {
+        self.cells.values().map(|v| v.len()).sum()
+    }
+
     /// Insert or update an entity at `(x, y)` on the given `layer` with optional `glyph`.
     /// The bucket maintains ascending layer order (layer 0: Terrain, 1: Item, 2: Creature, 3: Overlay).
     pub fn insert(&mut self, eid: u64, x: i32, y: i32, layer: u8, glyph: Option<VisualGlyph>) {

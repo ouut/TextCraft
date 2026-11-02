@@ -80,7 +80,14 @@ impl ViewportRasterizer {
                     (' ', None, None, false)
                 } else {
                     match ecs.spatial.top_glyph(x, y) {
-                        Some(glyph) => (glyph.ch, glyph.fg, glyph.bg, glyph.double_width),
+                        Some(glyph) => {
+                            let fg = if x == center_x && y == center_y && glyph.ch == '@' {
+                                Some(Color::rgb(255, 255, 100))
+                            } else {
+                                glyph.fg
+                            };
+                            (glyph.ch, fg, glyph.bg, glyph.double_width)
+                        }
                         None => (' ', None, None, false),
                     }
                 };
