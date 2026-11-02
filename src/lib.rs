@@ -5,7 +5,7 @@ pub mod types;
 pub use clap;
 pub use logic::{OutboundMessage, SchemeLogic};
 pub use runtime::{
-    run_server, ServerArgs, ServerHandleExt, TextCraftServer, EMBEDDED_WEB_ASSETS,
+    run_server, LogLevel, ServerArgs, ServerHandleExt, TextCraftServer, EMBEDDED_WEB_ASSETS,
 };
 pub use types::*;
 

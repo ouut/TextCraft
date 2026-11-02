@@ -5,12 +5,42 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use game_net::PlayerId;
 use game_server::{ServerConfig, ServerHandle};
 
 use crate::logic::{OutboundMessage, SchemeLogic};
 use crate::types::{PlayerInput, PlayerSnapshot, TextCraftCommand, TextCraftEvent};
+
+/// Log verbosity level for the TextCraft server.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    #[default]
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    /// Returns the `tracing` filter directive string for this log level.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// In-memory static web client assets embedded directly into the binary.
 pub static EMBEDDED_WEB_ASSETS: [(&str, &[u8], &str); 2] = [
@@ -64,9 +94,13 @@ pub struct ServerArgs {
     #[arg(long, default_value = "scripts")]
     pub scripts_dir: PathBuf,
 
-    /// Disable hot reloading file watcher for Scheme scripts
-    #[arg(long, default_value_t = false)]
-    pub no_watch_scripts: bool,
+    /// Enable hot reloading file watcher for Scheme scripts (polls every 2s)
+    #[arg(short = 'w', long, default_value_t = false)]
+    pub watch: bool,
+
+    /// Log verbosity level (error, warn, info, debug, trace)
+    #[arg(long, value_enum, default_value_t = LogLevel::Info)]
+    pub log_level: LogLevel,
 
     /// Simulation clock time scale factor
     #[arg(long, default_value_t = 1.0)]
@@ -97,6 +131,7 @@ pub struct TextCraftServer {
     pub time_scale: f32,
     pub autosave_sec: u64,
     pub snapshot_heartbeat_ms: u64,
+    pub log_level: LogLevel,
     last_snapshots: HashMap<PlayerId, (u64, Instant, u64, PlayerSnapshot)>,
     player_tokens: HashMap<PlayerId, String>,
     last_reload_check: Option<Instant>,
@@ -140,7 +175,7 @@ impl TextCraftServer {
     pub async fn start(args: ServerArgs) -> Result<Self, Box<dyn std::error::Error>> {
         let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
         let config = ServerConfig::new(addr).with_embedded_assets(&EMBEDDED_WEB_ASSETS);
-        let mut logic = SchemeLogic::new(args.scripts_dir, !args.no_watch_scripts, args.save_file)?;
+        let mut logic = SchemeLogic::new(args.scripts_dir, args.watch, args.save_file)?;
         logic.init()?;
 
         let mut server = Self::start_with_config(
@@ -152,6 +187,7 @@ impl TextCraftServer {
         )
         .await?;
         server.snapshot_heartbeat_ms = args.snapshot_heartbeat_ms;
+        server.log_level = args.log_level;
         Ok(server)
     }
 
@@ -178,6 +214,7 @@ impl TextCraftServer {
             time_scale,
             autosave_sec,
             snapshot_heartbeat_ms: 1000,
+            log_level: LogLevel::Info,
             last_snapshots: HashMap::new(),
             player_tokens: HashMap::new(),
             last_reload_check: None,
@@ -199,10 +236,11 @@ impl TextCraftServer {
     pub fn tick(&mut self, dt: f32) -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
 
-        // 1. Script hot reloading check (throttled to at most once per 500ms)
-        if self
-            .last_reload_check
-            .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(500))
+        // 1. Script hot reloading check (only when --watch is enabled, throttled to at most once per 2s)
+        if self.logic.watch_enabled()
+            && self
+                .last_reload_check
+                .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(2))
         {
             let _ = self.logic.check_reload();
             self.last_reload_check = Some(now);
@@ -226,6 +264,7 @@ impl TextCraftServer {
                             ),
                         },
                     );
+                    tracing::info!(player_id, token = %token, "Player joined");
                 }
                 game_server::SessionEvent::PlayerDisconnected {
                     player_id,
@@ -271,6 +310,7 @@ impl TextCraftServer {
                     if let Err(e) = self.logic.on_player_leave(player_id) {
                         tracing::warn!(player_id, error = %e, "on_player_leave error");
                     }
+                    tracing::info!(player_id, "Player session terminated and archived");
                 }
             }
         }
@@ -331,8 +371,19 @@ impl TextCraftServer {
                             if let Some(entry) = self.last_snapshots.get_mut(&pid) {
                                 entry.1 = now;
                                 let snap = entry.3.clone();
+                                tracing::trace!(
+                                    player_id = pid,
+                                    visual_version = current_ver,
+                                    "Sending periodic heartbeat snapshot"
+                                );
                                 self.handle.send_snapshot(pid, snap);
                             }
+                        } else {
+                            tracing::trace!(
+                                player_id = pid,
+                                visual_version = current_ver,
+                                "Skipping unchanged snapshot (visual version unchanged)"
+                            );
                         }
                         continue;
                     }
@@ -342,6 +393,11 @@ impl TextCraftServer {
             match self.logic.render_snapshot(pid) {
                 Ok(snapshot) => {
                     if self.snapshot_heartbeat_ms == 0 {
+                        tracing::trace!(
+                            player_id = pid,
+                            visual_version = current_ver,
+                            "Sending snapshot (deduplication disabled)"
+                        );
                         self.handle.send_snapshot(pid, snapshot);
                     } else {
                         let mut hasher = DefaultHasher::new();
@@ -362,6 +418,12 @@ impl TextCraftServer {
                         };
 
                         if should_send {
+                            tracing::trace!(
+                                player_id = pid,
+                                visual_version = current_ver,
+                                hash = current_hash,
+                                "Sending updated snapshot to player"
+                            );
                             self.last_snapshots.insert(
                                 pid,
                                 (current_hash, now_after_render, current_ver, snapshot.clone()),
@@ -369,6 +431,11 @@ impl TextCraftServer {
                             self.handle.send_snapshot(pid, snapshot);
                         } else if let Some(entry) = self.last_snapshots.get_mut(&pid) {
                             entry.2 = current_ver;
+                            tracing::trace!(
+                                player_id = pid,
+                                visual_version = current_ver,
+                                "Skipping snapshot (content hash unchanged)"
+                            );
                         }
                     }
                 }
@@ -389,17 +456,20 @@ impl TextCraftServer {
                     let code = trimmed.strip_prefix('!').unwrap_or(trimmed).trim();
                     self.process_admin_eval(pid, code);
                 } else {
+                    tracing::debug!(player_id = pid, cmd = %raw_cmd, "Processing player command");
                     if let Err(e) = self.logic.on_command(pid, &raw_cmd) {
                         tracing::warn!(player_id = pid, error = %e, "on_command error");
                     }
                 }
             }
             PlayerInput::Key { .. } | PlayerInput::Mouse { .. } => {
+                tracing::trace!(player_id = pid, ?input, "Dispatching player input");
                 if let Err(e) = self.logic.on_input(pid, &input) {
                     tracing::warn!(player_id = pid, error = %e, "on_input error");
                 }
             }
             PlayerInput::UIAction { action, payload } => {
+                tracing::trace!(player_id = pid, action = %action, "Dispatching player UI action");
                 if let Err(e) = self.logic.on_ui_action(pid, &action, &payload) {
                     tracing::warn!(player_id = pid, error = %e, "on_ui_action error");
                 }
@@ -430,6 +500,7 @@ impl TextCraftServer {
         let is_admin = self.is_admin_authorized(pid);
 
         if is_admin {
+            tracing::debug!(player_id = pid, code = %code, "Executing admin REPL evaluation");
             match self.logic.eval_repl(code) {
                 Ok(result) => {
                     self.handle.send_event(
@@ -441,10 +512,16 @@ impl TextCraftServer {
                     );
                 }
                 Err(err) => {
+                    tracing::warn!(player_id = pid, error = %err, "Admin REPL evaluation error");
                     self.handle.send_event(pid, TextCraftEvent::Error { text: err });
                 }
             }
         } else {
+            tracing::warn!(
+                player_id = pid,
+                code = %code,
+                "Rejected unauthorized admin REPL evaluation attempt"
+            );
             self.handle.send_event(
                 pid,
                 TextCraftEvent::Error {
@@ -461,8 +538,9 @@ impl TextCraftServer {
         let autosave_interval = Duration::from_secs(self.autosave_sec);
 
         tracing::info!(
-            local_addr = %self.handle.local_addr(),
-            admin_token = %self.admin_token,
+            addr = %self.handle.local_addr(),
+            watch = self.logic.watch_enabled(),
+            log_level = %self.log_level,
             "TextCraft 3.0 Server running"
         );
 

@@ -71,18 +71,19 @@ TextCraft/
   │   ├── integration_tests.rs      # 8 个端到端集成测试套件
   │   ├── server_gateway_test.rs    # 2 个服务端网关与生命周期测试
   │   ├── snapshot_dedup_test.rs    # 4 个快照去重与保活心跳测试
-  │   └── phase5_verification_test.rs # 7 个全链路回归与性能基准验证测试
+  │   └── phase5_verification_test.rs # 8 个全链路回归、多用户身份与性能基准测试
   ├── scripts/
   │   ├── prelude.scm               # 16x16 Chunk 分块存储、ANSI RLE 光栅化器与 HUD 构建器
   │   └── main.scm                  # 地图生成、碰撞检测、战斗伤害、AI 与变频控制
   ├── build.sh                      # 本地跨平台打包脚本 (Linux / macOS)
   ├── build.ps1                     # 本地打包脚本 (Windows PowerShell)
   └── docs/
-      ├── agent_developer_guide.md  # 游戏 (Scheme) 与前端 (HUD SDK) Agent 开发者综合指南
+      ├── develop/
+      │   └── agent_developer_guide.md # 游戏 (Scheme) 与前端 (HUD SDK) Agent 开发者综合指南
       └── project/                  # 本项目（引擎宿主）开发文档
           ├── specification_3.0.0.md # 引擎 3.0 架构与技术规范
           ├── agents_3.0.0.md       # 引擎开发多智能体协作规范
-          └── todo.md               # 主循环优化与架构修复执行清单
+          └── changelog.md          # 版本演进与架构变更日志 (v3.0.0 -> v3.1.0)
 ```
 
 ---
@@ -136,17 +137,17 @@ cargo check --release
 #### 常用启动场景示例：
 
 ```bash
-# 1. 默认启动 (全网卡监听 0.0.0.0:8081，加载 scripts/ 目录并自动启用 Scheme 热重载)
+# 1. 默认启动 (全网卡监听 0.0.0.0:8081，默认关闭热重载，日志级别 info)
 cargo run
 
-# 2. 高性能发布模式启动 (最高性能，适合联机或部署)
+# 2. 开发热重载与调试模式启动 (开启 2s 周期脚本热重载监控 + debug 级别日志)
+cargo run -- --watch --log-level debug
+
+# 3. 高性能发布模式启动 (最高性能，适合联机或部署)
 cargo run --release
 
-# 3. 开发调试模式 (启用完整 tracing 详细日志输出)
-RUST_LOG=info,textcraft=debug cargo run
-
-# 4. 指定端口与自定义脚本路径
-cargo run -- --port 8888 --scripts-dir scripts
+# 4. 指定端口、自定义脚本路径与开启热重载 (-w)
+cargo run -- -w --port 8888 --scripts-dir scripts
 
 # 5. 生产高可用启动 (带世界状态持久化与自动定时存档，每 30 秒存档一次)
 cargo run --release -- \
@@ -168,7 +169,8 @@ cargo run -- \
 | `--host <ip>` | `host` | `String` | `0.0.0.0` | 绑定监听地址。`0.0.0.0` 允许本机与局域网设备同时访问 |
 | `--port <port>` | `port` | `u16` | `8081` | 监听 HTTP Web 资源与 WebSocket 网关服务端口 |
 | `--scripts-dir <path>` | `scripts_dir` | `PathBuf` | `scripts` | Scheme 脚本所在目录（必须包含 `prelude.scm` 与 `main.scm`） |
-| `--no-watch-scripts` | `no_watch_scripts` | `bool` | `false` | 关闭脚本文件变动自动热重载（默认开启，脚本修改后即刻生效） |
+| `-w, --watch` | `watch` | `bool` | `false` | 开启 Scheme 脚本自动热重载监控（每 2 秒轮询一次，修改保存后无损状态自动重载；默认关闭零开销） |
+| `--log-level <level>` | `log_level` | `LogLevel` | `info` | 日志输出级别（枚举：`error`、`warn`、`info`、`debug`、`trace`；若显式设置 `RUST_LOG` 环境变量则优先遵循 `RUST_LOG`） |
 | `--time-scale <scale>` | `time_scale` | `f32` | `1.0` | 模拟时钟流逝倍率（例如 `2.0` 表示双倍速流逝，`0.5` 表示半速） |
 | `--admin-token <token>` | `admin_token` | `String` | `admin` | 管理员认证 Token。在游戏控制台输入以 `!` 开头的指令进行 REPL 求值 |
 | `--save-file <path>` | `save_file` | `PathBuf` | `None` | 世界纯数据状态存档路径（原子保存与断点恢复；未指定则不落盘） |

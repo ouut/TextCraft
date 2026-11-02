@@ -440,8 +440,8 @@ TextCraft.sendMouse(10, 5, 'left');
 
 ### 配方 3：热重载与管理员实时 REPL 调试技巧
 
-1. **保存即热重载（零重启）**：
-   服务端默认开启脚本监控（每 500ms 轻量检查一次 `scripts/` 根目录下的 `.scm` 修改时间）。修改 `scripts/prelude.scm` 或 `scripts/main.scm` 保存后，宿主会自动调用 `(engine:export-state)` 备份当前所有分块与玩家数据，重编译脚本后再通过 `(engine:import-state)` 无缝恢复（若新脚本存在语法错误，宿主会自动回滚状态并保留旧环境运行，不会崩溃）。
+1. **保存即热重载（`--watch` / `-w` 开启，零重启）**：
+   开发调试时通过 `cargo run -- --watch --log-level debug`（或 `-w`）启动服务端，宿主会每 2 秒轻量检查一次 `scripts/` 根目录下的 `.scm` 修改时间（未开启 `--watch` 时默认零开销短路）。修改 `scripts/prelude.scm` 或 `scripts/main.scm` 保存后，宿主会自动调用 `(engine:export-state)` 备份当前所有分块与玩家数据，重编译脚本后再通过 `(engine:import-state)` 无缝恢复（若新脚本存在语法错误，宿主会自动回滚状态并保留旧环境运行，不会崩溃）。
 2. **管理员 `!` REPL 在线求值与多用户 URL 路由**：
    前端支持 `#/username` 与 `#/username/token` 路由（例如 `http://127.0.0.1:8081/#/alice` 或 `http://127.0.0.1:8081/#/bob/admin`，也兼容 `?user=bob&token=admin` 或 `?token=admin`）。当 URL 显式指定身份时不会覆盖 `localStorage`，方便单浏览器多开标签页联机调试。携带管理员 Token（默认 `admin`）后，在底部命令框输入 `!` 开头的任意 Scheme 代码即可直接操作线上世界：
    - `! (get-player 1)` $\rightarrow$ 查看玩家 1 的完整 Hash 数据

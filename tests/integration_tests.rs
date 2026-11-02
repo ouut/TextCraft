@@ -6,7 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use game_net::{ClientEnvelope, DualCodec, ServerEnvelope};
 use game_server::ServerConfig;
 use textcraft::{
-    clap::Parser, PlayerInput, PlayerSnapshot, SchemeLogic, ServerArgs, TextCraftCommand,
+    clap::Parser, LogLevel, PlayerInput, PlayerSnapshot, SchemeLogic, ServerArgs, TextCraftCommand,
     TextCraftEvent, TextCraftServer, EMBEDDED_WEB_ASSETS,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,7 +35,9 @@ fn test_1_cli_argument_parsing_and_config() {
         "9999",
         "--scripts-dir",
         "custom_scripts",
-        "--no-watch-scripts",
+        "--watch",
+        "--log-level",
+        "debug",
         "--time-scale",
         "1.5",
         "--admin-token",
@@ -52,12 +54,20 @@ fn test_1_cli_argument_parsing_and_config() {
     assert_eq!(args.host, "0.0.0.0");
     assert_eq!(args.port, 9999);
     assert_eq!(args.scripts_dir, PathBuf::from("custom_scripts"));
-    assert!(args.no_watch_scripts);
+    assert!(args.watch);
+    assert_eq!(args.log_level, LogLevel::Debug);
+    assert_eq!(args.log_level.as_str(), "debug");
     assert!((args.time_scale - 1.5).abs() < 1e-4);
     assert_eq!(args.admin_token, "my_super_token");
     assert_eq!(args.save_file, Some(PathBuf::from("my_save.json")));
     assert_eq!(args.autosave_sec, 45);
     assert_eq!(args.snapshot_heartbeat_ms, 500);
+
+    // Short flag `-w` and `--log-level trace` verification
+    let short_args = ServerArgs::try_parse_from(["textcraft-server", "-w", "--log-level", "trace"])
+        .expect("Short -w flag should parse");
+    assert!(short_args.watch);
+    assert_eq!(short_args.log_level, LogLevel::Trace);
 
     // 2. Default arguments verification
     let default_args =
@@ -65,7 +75,8 @@ fn test_1_cli_argument_parsing_and_config() {
     assert_eq!(default_args.host, "0.0.0.0");
     assert_eq!(default_args.port, 8081);
     assert_eq!(default_args.scripts_dir, PathBuf::from("scripts"));
-    assert!(!default_args.no_watch_scripts);
+    assert!(!default_args.watch);
+    assert_eq!(default_args.log_level, LogLevel::Info);
     assert_eq!(default_args.admin_token, "admin");
     assert_eq!(default_args.autosave_sec, 30);
     assert!(default_args.save_file.is_none());

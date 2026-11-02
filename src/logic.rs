@@ -167,6 +167,11 @@ impl SchemeLogic {
         self.save_file.is_some()
     }
 
+    /// Whether script hot reloading file watcher is enabled.
+    pub fn watch_enabled(&self) -> bool {
+        self.watcher.is_some()
+    }
+
     /// Query current target FPS from Scheme (clamped 1..=60, default 60).
     pub fn query_target_fps(&mut self) -> u64 {
         match self.app.call_function("engine:target-fps", vec![]) {
@@ -408,7 +413,7 @@ impl SchemeLogic {
         std::fs::write(&tmp_path, content)?;
         std::fs::rename(&tmp_path, &save_path)?;
 
-        tracing::info!(path = %save_path.display(), "Game state atomically saved");
+        tracing::debug!(path = %save_path.display(), "Game state atomically saved");
         Ok(())
     }
 
@@ -428,16 +433,20 @@ impl SchemeLogic {
         self.import_state(&json)
             .map_err(std::io::Error::other)?;
 
-        tracing::info!(path = %save_path.display(), "Game state loaded from save file");
+        tracing::debug!(path = %save_path.display(), "Game state loaded from save file");
         Ok(true)
     }
 
     /// Check if watched `.scm` script files have been modified and reload with state preservation.
     pub fn check_reload(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
         let is_modified = if let Some(ref mut watcher) = self.watcher {
+            tracing::trace!(
+                scripts_dir = %self.scripts_dir.display(),
+                "Checking scripts directory for modifications"
+            );
             watcher.check_modified()
         } else {
-            false
+            return Ok(false);
         };
 
         if is_modified {
