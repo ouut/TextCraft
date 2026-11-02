@@ -71,33 +71,40 @@ flowchart TD
 
 ```text
 TextCraft/
-  ├── Cargo.toml                    # 极简单一 Crate 配置 (textcraft v3.0.0)
-  ├── src/                          # 宿主核心源码 (Tokio + Axum + Steel VM)
-  │   ├── lib.rs                    # 核心导出、单元测试与生命周期集成
+  ├── Cargo.toml                    # 极简单一 Crate 配置 (textcraft v4.0.0)
+  ├── src/                          # 宿主核心源码 (Tokio + Axum + Steel VM + Flecs)
+  │   ├── lib.rs                    # 核心导出、集成测试入口
   │   ├── main.rs                   # 服务端独立入口
-  │   ├── logic.rs                  # Scheme VM 封装、热重载、看门狗与宿主函数
-  │   ├── runtime.rs                # Axum 静态资源嵌入、WebSocket 网关与自适应调度
+  │   ├── ecs/                      # Flecs ECS 底座、物理组件与世界封装
+  │   ├── spatial/                  # SpatialGrid 空间哈希与图层索引
+  │   ├── render/                   # ViewportRasterizer 原生 ANSI RLE 光栅化
+  │   ├── operators/                # Roguelike 数学密集算子 (FOV / A* / Dijkstra / Noise / Cave)
+  │   ├── logic/                    # Scheme VM 封装、热重载、看门狗与 ecs_* FFI 原语绑定
+  │   ├── runtime.rs                # Axum HTTP + WebSocket 网关、自适应变频主循环
+  │   ├── mcp.rs                    # MCP JSON-RPC 2.0 服务端与工具透视 (ecs_inspect/query/modify)
   │   └── types.rs                  # 传输层极简协议 (PlayerInput, PlayerSnapshot, Event)
   ├── web/
   │   └── index.html                # 极简 Hybrid Web 客户端 (内置 window.TextCraft SDK 与基础 HUD)
-  ├── tests/
-  │   ├── integration_tests.rs      # 8 个端到端集成测试套件
-  │   ├── server_gateway_test.rs    # 2 个服务端网关与生命周期测试
-  │   ├── snapshot_dedup_test.rs    # 4 个快照去重与保活心跳测试
-  │   └── phase5_verification_test.rs # 8 个全链路回归、多用户身份与性能基准测试
-  ├── scripts/
-  │   ├── prelude.scm               # 16x16 Chunk 分块存储、ANSI RLE 光栅化器与 HUD 构建器
-  │   └── main.scm                  # 地图生成、碰撞检测、战斗伤害、AI 与变频控制
+  ├── tests/                        # 集成测试与规模化性能基准
+  ├── scripts/                      # Steel Scheme 动态脚本层 (自动按序加载)
+  │   ├── prelude.scm               # 常量图层、分块兼容、ECS DSL 宏与 HUD 工具
+  │   ├── anatomy.scm               # 解剖学多肢体系统与暴击断肢掉落
+  │   ├── chemistry.scm             # 液体池热力学相变与元素化学反应
+  │   ├── mutation.scm              # 物理/精神变异与主动能力系统
+  │   ├── worldgen.scm              # 程序化洞窟、盐沼与生态种群生成
+  │   └── main.scm                  # 回合主循环、网络协议响应与生命周期钩子
   ├── build.sh                      # 本地跨平台打包脚本 (Linux / macOS)
   ├── build.ps1                     # 本地打包脚本 (Windows PowerShell)
   └── docs/
       ├── develop/
-      │   ├── agent_developer_guide.md # 游戏 (Scheme) 与前端 (HUD SDK) Agent 开发者综合指南
-      │   └── mcp_developer_guide.md   # MCP (Model Context Protocol) 开发者与 AI 协同开发指南
+      │   ├── scheme_developer_guide.md # Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南 (v4.0 核心)
+      │   ├── agent_developer_guide.md  # 游戏 (Scheme) 与前端 (HUD SDK) Agent 开发者综合指南
+      │   └── mcp_developer_guide.md    # MCP (Model Context Protocol) 开发者与 AI 协同开发指南
       └── project/                  # 本项目（引擎宿主）开发文档
+          ├── v4.0_architecture_and_roadmap.md # v4.0 双引擎架构与演进路线图
           ├── specification_3.0.0.md # 引擎 3.0 架构与技术规范
           ├── agents_3.0.0.md       # 引擎开发多智能体协作规范
-          └── changelog.md          # 版本演进与架构变更日志 (v3.0.0 -> v3.2.0)
+          └── changelog.md          # 版本演进与架构变更日志
 ```
 
 ---
@@ -258,11 +265,14 @@ Scheme 主脚本需实现以下标准生命周期函数：
 
 ### 宿主注入函数 (Host Functions)
 
-Rust 宿主向 Scheme 运行环境注册了以下通用系统功能：
-- `(engine:send-message pid channel text)`：向指定玩家发送事件通知
-- `(engine:broadcast channel text)`：向全服广播事件通知
-- `(engine:log text)`：在服务端输出 tracing 日志
-- `(engine:random-int min max)`：生成范围内的安全伪随机整数
+Rust 宿主向 Scheme 运行环境注册了系统级日志、随机数与广播原语，并在 v4.0 中全面注入了 Flecs ECS 与 Roguelike 数学密集算子：
+- 通用基础：`(engine:send-message pid channel text)`、`(engine:broadcast channel text)`、`(engine:log text)`、`(engine:random-int min max)`
+- ECS 状态管理：`(ecs:spawn)`、`(ecs:despawn id)`、`(ecs:set-pos id x y layer)`、`(ecs:get-pos id)`、`(ecs:set-glyph id ch fg bg solid opaque)`、`(ecs:set id key val)`、`(ecs:get id key)`、`(ecs:relate id rel target)`、`(ecs:query query-str)` 等
+- 通用数学算子：`(ecs:fov origin-x origin-y radius)`、`(ecs:find-path start-x start-y goal-x goal-y)`、`(ecs:dijkstra-map goals)`、`(ecs:noise-2d x y scale)`、`(ecs:generate-cave w h iterations fill-prob)`
+
+> [!TIP]
+> **完整 Rust-Scheme FFI 与开发指南**：
+> 有关 4.0 详细的原语参数签名、类型映射、DSL 宏、Qud 涌现机制与 MCP 在线调试实战，请参阅专门文档：[**《Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南》 (`docs/develop/scheme_developer_guide.md`)**](docs/develop/scheme_developer_guide.md)。
 
 ---
 
