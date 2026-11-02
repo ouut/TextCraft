@@ -42,10 +42,23 @@ fn sort_script_files(files: &mut [PathBuf]) {
     files.sort_by(|a, b| {
         let is_prelude_a = a.file_name().is_some_and(|f| f == "prelude.scm");
         let is_prelude_b = b.file_name().is_some_and(|f| f == "prelude.scm");
-        match (is_prelude_a, is_prelude_b) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.cmp(b),
+        let is_main_a = a.file_name().is_some_and(|f| f == "main.scm");
+        let is_main_b = b.file_name().is_some_and(|f| f == "main.scm");
+
+        if is_prelude_a || is_prelude_b {
+            match (is_prelude_a, is_prelude_b) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.cmp(b),
+            }
+        } else if is_main_a || is_main_b {
+            match (is_main_a, is_main_b) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => a.cmp(b),
+            }
+        } else {
+            a.cmp(b)
         }
     });
 }
@@ -175,22 +188,20 @@ impl SchemeLogic {
         Arc::clone(&self.rasterizer)
     }
 
-    /// Load scripts (`prelude.scm`, `main.scm`), call `(engine:on-init)`, and restore save file if present.
+    /// Load all `.scm` scripts in order (`prelude.scm` first, `main.scm` last), call `(engine:on-init)`, and restore save file if present.
     pub fn init(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let prelude_path = self.scripts_dir.join("prelude.scm");
-        if prelude_path.exists() {
-            let code = std::fs::read_to_string(&prelude_path)?;
-            self.app
-                .engine
-                .compile_and_run_raw_program_with_path(code, prelude_path)?;
-        }
+        let entries = std::fs::read_dir(&self.scripts_dir)?;
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|entry| entry.path()))
+            .filter(|f| f.is_file() && f.extension().is_some_and(|ext| ext == "scm"))
+            .collect();
+        sort_script_files(&mut files);
 
-        let main_path = self.scripts_dir.join("main.scm");
-        if main_path.exists() {
-            let code = std::fs::read_to_string(&main_path)?;
+        for file in files {
+            let code = std::fs::read_to_string(&file)?;
             self.app
                 .engine
-                .compile_and_run_raw_program_with_path(code, main_path)?;
+                .compile_and_run_raw_program_with_path(code, file)?;
         }
 
         // Initialize default world state
