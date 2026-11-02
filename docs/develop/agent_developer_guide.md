@@ -2,9 +2,10 @@
 
 > [!IMPORTANT]
 > **致阅读本指南的开发者与智能体（Agent）**：
-> TextCraft 3.0 采用 **“纯 Scheme 游戏核心 + 零业务耦合 Rust 宿主 + 极简 Web 终端底座”** 架构：
+> TextCraft 3.0 采用 **“纯 Scheme 游戏核心 + 零业务耦合 Rust 宿主 + 极简 Web 终端底座 + 单进程 MCP AI 管道”** 架构：
 > - **开发游戏玩法与世界逻辑**：只需修改 `scripts/prelude.scm` 与 `scripts/main.scm`，**无需阅读或修改任何 Rust 代码**；
-> - **定制前端 HUD 界面与交互**：只需在 `web/index.html` 中调用全局桥接对象 `window.TextCraft`，自由编写原生 HTML/CSS/JS，通过纯 JSON 字典与 Scheme 通信。
+> - **定制前端 HUD 界面与交互**：只需在 `web/index.html` 中调用全局桥接对象 `window.TextCraft`，自由编写原生 HTML/CSS/JS，通过纯 JSON 字典与 Scheme 通信；
+> - **使用 MCP 工具与 AI 实时协同开发**：通过 `--mcp-port 8082` 开启 HTTP JSON-RPC 2.0 MCP 接口，并可在 `.scm` 中调用 `(mcp:def-tool ...)` 动态自举扩展新工具，详见 [**《MCP 开发者与 AI 协同开发指南》 (`docs/develop/mcp_developer_guide.md`)**](mcp_developer_guide.md)。
 
 ---
 

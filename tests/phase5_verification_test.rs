@@ -860,3 +860,343 @@ async fn test_task_5_3_ansi_rle_compactness_and_10_players_tick_benchmark() {
 
     server.handle.shutdown();
 }
+
+
+// ============================================================================
+// Task 5.4: MCP HTTP JSON-RPC 2.0 管道、宿主命令桥接与 Scheme 动态工具扩展测试
+// ============================================================================
+
+async fn send_mcp_http_post(
+    server: &mut TextCraftServer,
+    mcp_addr: SocketAddr,
+    path: &str,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let body = serde_json::to_string(&payload).unwrap();
+    let req_str = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        path,
+        mcp_addr,
+        body.len(),
+        body
+    );
+
+    let join = tokio::spawn(async move {
+        let mut stream = tokio::net::TcpStream::connect(mcp_addr).await.unwrap();
+        stream.write_all(req_str.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let resp_str = String::from_utf8(buf).unwrap();
+        let (_, json_body) = resp_str
+            .split_once("\r\n\r\n")
+            .expect("HTTP response should contain header/body separator");
+        serde_json::from_str::<serde_json::Value>(json_body.trim()).unwrap()
+    });
+
+    while !join.is_finished() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        server.tick(0.016).unwrap();
+    }
+
+    join.await.unwrap()
+}
+
+#[tokio::test]
+async fn test_mcp_http_server_command_bridge_and_dynamic_scheme_tools() {
+    let scripts_dir = get_scripts_dir();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let config = ServerConfig::new(addr).with_embedded_assets(&EMBEDDED_WEB_ASSETS);
+    let mut logic = SchemeLogic::new(&scripts_dir, false, None).unwrap();
+    logic.init().unwrap();
+
+    let mut server = TextCraftServer::start_with_config(config, logic, "admin".to_string(), 1.0, 0)
+        .await
+        .unwrap();
+
+    // Bind MCP HTTP server on dynamic port
+    let mcp_addr = server
+        .start_mcp_server("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(server.mcp_local_addr(), Some(mcp_addr));
+
+    // Join player 1
+    server.logic.on_player_join(1, "alice:admin").unwrap();
+
+    // 1. Test `initialize` handshake
+    let init_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }),
+    )
+    .await;
+    assert_eq!(init_resp["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(init_resp["result"]["serverInfo"]["name"], "textcraft-mcp");
+    assert_eq!(
+        init_resp["result"]["capabilities"]["tools"]["listChanged"],
+        true
+    );
+
+    // 2. Test `tools/list`: verify both host bridge tools and Scheme built-in tools are present
+    let list_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }),
+    )
+    .await;
+    let tools = list_resp["result"]["tools"]
+        .as_array()
+        .expect("tools should be an array");
+    let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    for expected in [
+        "game_command",
+        "player_input",
+        "reload_scripts",
+        "get_world_summary",
+        "get_viewport",
+        "teleport_player",
+        "spawn_monster",
+    ] {
+        assert!(
+            tool_names.contains(&expected),
+            "tools/list should contain '{}', got {:?}",
+            expected,
+            tool_names
+        );
+    }
+
+    // 3. Test `game_command` with normal game command `(where)` and `! (+ 40 2)` REPL evaluation
+    let cmd_where_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "game_command",
+                "arguments": {
+                    "player_id": 1,
+                    "command": "(where)"
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(cmd_where_resp["result"]["isError"], false);
+    let cmd_where_text = cmd_where_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    let cmd_where_json: serde_json::Value = serde_json::from_str(cmd_where_text).unwrap();
+    assert!(
+        !cmd_where_json["ascii_screen"]
+            .as_str()
+            .unwrap()
+            .contains("\x1b["),
+        "ascii_screen must have ANSI escape sequences stripped"
+    );
+    assert!(
+        cmd_where_json["hud"]["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["text"].as_str().is_some_and(|t| t.contains("当前位置"))),
+        "Player 1 HUD logs should contain (where) result"
+    );
+
+    let cmd_repl_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "game_command",
+                "arguments": {
+                    "command": "! (+ 40 2)"
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(cmd_repl_resp["result"]["isError"], false);
+    let repl_text = cmd_repl_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        repl_text.contains("42"),
+        "REPL evaluation of ! (+ 40 2) should return 42, got: {}",
+        repl_text
+    );
+
+    // 4. Test Scheme built-in tools: `teleport_player` and `spawn_monster`
+    let tp_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "teleport_player",
+                "arguments": {
+                    "player_id": 1,
+                    "x": 3,
+                    "y": -2
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(tp_resp["result"]["isError"], false);
+    let tp_json: serde_json::Value =
+        serde_json::from_str(tp_resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(tp_json["x"], 3);
+    assert_eq!(tp_json["y"], -2);
+
+    let spawn_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "spawn_monster",
+                "arguments": {
+                    "id": "dragon_1",
+                    "name": "远古红龙",
+                    "glyph": "D",
+                    "x": 4,
+                    "y": -2,
+                    "hp": 200,
+                    "attack": 25
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(spawn_resp["result"]["isError"], false);
+
+    // Verify via `get_world_summary` and `get_viewport`
+    let summary_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "get_world_summary",
+                "arguments": {}
+            }
+        }),
+    )
+    .await;
+    let summary_json: serde_json::Value = serde_json::from_str(
+        summary_resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        summary_json.get("chunks").is_none(),
+        "get_world_summary must exclude bulky chunks data"
+    );
+    assert!(
+        summary_json["monsters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == "dragon_1" && m["x"] == 4 && m["y"] == -2),
+        "get_world_summary should include newly spawned dragon_1"
+    );
+
+    // 5. Core verification: dynamically register a brand-new MCP tool at runtime via `game_command`
+    let def_tool_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "game_command",
+                "arguments": {
+                    "command": "! (mcp:def-tool \"custom_ping\" \"AI dynamic tool\" (hash \"type\" \"object\") (lambda (args) (hash \"pong\" (map-get args \"msg\" \"ok\"))))"
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(def_tool_resp["result"]["isError"], false);
+
+    // Immediately verify `custom_ping` appears in `tools/list`
+    let list_resp2 = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/list",
+            "params": {}
+        }),
+    )
+    .await;
+    let tools2 = list_resp2["result"]["tools"].as_array().unwrap();
+    assert!(
+        tools2.iter().any(|t| t["name"] == "custom_ping"),
+        "Dynamically registered 'custom_ping' must immediately appear in tools/list"
+    );
+
+    // Immediately call `custom_ping` via `tools/call`
+    let call_custom_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        "/mcp",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "custom_ping",
+                "arguments": {
+                    "msg": "hello_from_ai"
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(call_custom_resp["result"]["isError"], false);
+    let custom_out: serde_json::Value = serde_json::from_str(
+        call_custom_resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(custom_out["pong"], "hello_from_ai");
+
+    server.handle.shutdown();
+}

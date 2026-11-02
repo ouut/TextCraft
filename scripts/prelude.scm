@@ -468,3 +468,39 @@
                            (string-join (reverse final-cols) ""))))))
             (loop-row (+ r 1) (cons row-str row-acc)))
           (string-join (reverse row-acc) "\n")))))
+
+
+;; ----------------------------------------------------------------------------
+;; Dynamic MCP (Model Context Protocol) Tool Registry
+;; ----------------------------------------------------------------------------
+
+(define *mcp-tools-meta* (hash))
+(define *mcp-tools-handlers* (hash))
+
+(define (mcp:def-tool name description input-schema-hash handler-proc)
+  (let* ((tname (if (string? name) name (to-string name)))
+         (tdesc (if (string? description) description (to-string description)))
+         (schema (if (hash? input-schema-hash)
+                     input-schema-hash
+                     (hash "type" "object" "properties" (hash))))
+         (meta (hash
+                 "name" tname
+                 "description" tdesc
+                 "inputSchema" schema)))
+    (set! *mcp-tools-meta* (hash-insert *mcp-tools-meta* tname meta))
+    (set! *mcp-tools-handlers* (hash-insert *mcp-tools-handlers* tname handler-proc))
+    tname))
+
+(define (engine:mcp-tools)
+  (let loop ((ks (hash-keys->list *mcp-tools-meta*)) (acc '()))
+    (if (null? ks)
+        (reverse acc)
+        (loop (cdr ks) (cons (hash-ref *mcp-tools-meta* (car ks)) acc)))))
+
+(define (engine:on-mcp-call name args)
+  (let* ((tname (if (string? name) name (to-string name)))
+         (handler (map-get *mcp-tools-handlers* tname #f))
+         (safe-args (if (hash? args) args (hash))))
+    (if handler
+        (handler safe-args)
+        (hash "error" (string-append "Unknown MCP tool: " tname)))))

@@ -692,3 +692,147 @@
         (bump-visual-version!)
         'ok)
       'error))
+
+
+;; ----------------------------------------------------------------------------
+;; Built-in Scheme MCP Tools (Registered via mcp:def-tool)
+;; ----------------------------------------------------------------------------
+
+(mcp:def-tool
+  "get_world_summary"
+  "Get global world summary including tick_count, target_fps, online/offline player states, and active monsters (excluding bulky chunk tile data)."
+  (hash "type" "object" "properties" (hash))
+  (lambda (args)
+    (let* ((players-map (map-get *world-state* "players" (hash)))
+           (summarize-player
+             (lambda (p)
+               (hash
+                 "id" (map-get p "id" 0)
+                 "name" (map-get p "name" "Hero")
+                 "online" (map-get p "online" #f)
+                 "x" (map-get p "x" 0)
+                 "y" (map-get p "y" 0)
+                 "hp" (map-get p "hp" 100)
+                 "max_hp" (map-get p "max_hp" 100)
+                 "mp" (map-get p "mp" 50)
+                 "max_mp" (map-get p "max_mp" 50)
+                 "gold" (map-get p "gold" 0)
+                 "level" (map-get p "level" 1))))
+           (active-players
+             (let loop ((ks (hash-keys->list players-map)) (acc '()))
+               (if (null? ks)
+                   (reverse acc)
+                   (loop (cdr ks) (cons (summarize-player (hash-ref players-map (car ks))) acc))))))
+      (hash
+        "tick_count" (map-get *world-state* "tick_count" 0)
+        "elapsed_sec" (map-get *world-state* "elapsed_sec" 0.0)
+        "target_fps" (map-get *world-state* "target_fps" 60)
+        "players" active-players
+        "monsters" (map-get *world-state* "monsters" '())))))
+
+(mcp:def-tool
+  "get_viewport"
+  "Get a player's current coordinates, HUD data, and ANSI-stripped plain-text ASCII viewport screen."
+  (hash
+    "type" "object"
+    "properties" (hash
+                   "player_id" (hash "type" "integer" "description" "Target player ID (default: 1)")))
+  (lambda (args)
+    (let* ((pid (map-get args "player_id" 1))
+           (p (get-player pid))
+           (px (if p (map-get p "x" 0) 0))
+           (py (if p (map-get p "y" 0) 0))
+           (vp (engine:viewport-size pid))
+           (cols (car vp))
+           (rows (cadr vp))
+           (ansi-screen (render-viewport-ansi pid cols rows))
+           (ascii-screen (engine:strip-ansi ansi-screen))
+           (hud (build-player-hud pid)))
+      (hash
+        "player_id" pid
+        "x" px
+        "y" py
+        "cols" cols
+        "rows" rows
+        "ascii_screen" ascii-screen
+        "hud" hud))))
+
+(mcp:def-tool
+  "teleport_player"
+  "Teleport a player to coordinates (x, y), push a notification to the player's HUD log, and bump visual version."
+  (hash
+    "type" "object"
+    "properties" (hash
+                   "player_id" (hash "type" "integer" "description" "Target player ID (default: 1)")
+                   "x" (hash "type" "integer" "description" "Target X coordinate")
+                   "y" (hash "type" "integer" "description" "Target Y coordinate"))
+    "required" (list "x" "y"))
+  (lambda (args)
+    (let* ((pid (map-get args "player_id" 1))
+           (tx (map-get args "x" 0))
+           (ty (map-get args "y" 0))
+           (p (ensure-player pid))
+           (p2 (hash-insert (hash-insert p "x" tx) "y" ty))
+           (log-msg (string-append "[mcp] AI 将你传送至 (" (number->string tx) ", " (number->string ty) ")")))
+      (set-player pid p2)
+      (player:add-log pid "system" log-msg)
+      (touch-activity!)
+      (bump-visual-version!)
+      (hash
+        "ok" #t
+        "player_id" pid
+        "x" tx
+        "y" ty
+        "message" log-msg))))
+
+(mcp:def-tool
+  "spawn_monster"
+  "Dynamically spawn a new monster at (x, y), register it in *world-state* and the actor tile layer, and broadcast a server-wide alert."
+  (hash
+    "type" "object"
+    "properties" (hash
+                   "id" (hash "type" "string" "description" "Unique monster ID")
+                   "name" (hash "type" "string" "description" "Monster display name")
+                   "glyph" (hash "type" "string" "description" "Single-character glyph")
+                   "x" (hash "type" "integer" "description" "Spawn X coordinate")
+                   "y" (hash "type" "integer" "description" "Spawn Y coordinate")
+                   "hp" (hash "type" "integer" "description" "Monster HP (default: 40)")
+                   "attack" (hash "type" "integer" "description" "Monster attack damage (default: 8)"))
+    "required" (list "id" "name" "glyph" "x" "y"))
+  (lambda (args)
+    (let* ((mid (to-string (map-get args "id" "monster_mcp")))
+           (mname (to-string (map-get args "name" "未知怪物")))
+           (mglyph (to-string (map-get args "glyph" "M")))
+           (mx (map-get args "x" 0))
+           (my (map-get args "y" 0))
+           (mhp (map-get args "hp" 40))
+           (mattack (map-get args "attack" 8))
+           (fg '(255 120 120))
+           (m (hash
+                "id" mid
+                "name" mname
+                "glyph" mglyph
+                "fg" fg
+                "x" mx
+                "y" my
+                "hp" mhp
+                "max_hp" mhp
+                "attack" mattack))
+           (old-ms (map-get *world-state* "monsters" '()))
+           (new-ms (append old-ms (list m)))
+           (msg (string-append "[mcp] 警告：新怪物 " mname " (" mglyph ") 出现在 (" (number->string mx) ", " (number->string my) ")！")))
+      (set! *world-state* (hash-insert *world-state* "monsters" new-ms))
+      (world:set-tile mx my 'actor
+        (hash "glyph" mglyph "fg" fg "bg" #f "solid" #t "name" mname "meta" m))
+      (let ((players (map-get *world-state* "players" (hash))))
+        (for-each
+          (lambda (k)
+            (let ((op (hash-ref players k)))
+              (if (map-get op "online" #t)
+                  (player:add-log (map-get op "id" k) "system" msg)
+                  #f)))
+          (hash-keys->list players)))
+      (engine:broadcast "system" msg)
+      (touch-activity!)
+      (bump-visual-version!)
+      (hash "ok" #t "monster" m))))

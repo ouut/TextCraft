@@ -1,6 +1,40 @@
 # TextCraft 版本演进与架构变更日志 (Changelog)
 
-本文档记录 TextCraft 从 `v3.0.0` 到 `v3.1.0` 的核心架构演进、全量缺陷修复、性能优化及开发者体验升级。
+本文档记录 TextCraft 从 `v3.0.0` 到 `v3.2.0` 的核心架构演进、全量缺陷修复、性能优化及开发者体验升级。
+
+---
+
+## [v3.2.0] - 2026-11-02
+
+### 1. 单进程 `--mcp-port` HTTP JSON-RPC 2.0 管道 (`src/runtime.rs` & `src/logic.rs`)
+- **CLI 新增 `--mcp-port <port>` 可选参数**：
+  - 在 `ServerArgs` 中新增 `--mcp-port`（如 `--mcp-port 8082`），并暴露 `TextCraftServer::start_mcp_server` 与 `mcp_local_addr`。
+  - 支持 `POST /mcp` 与 `POST /` 接收标准 Model Context Protocol (MCP) JSON-RPC 2.0 请求（`initialize`、`notifications/initialized`、`ping`、`tools/list`、`tools/call`）。
+- **无锁通道投递与主循环同帧同步**：
+  - HTTP Handler 通过 `mpsc::unbounded_channel` + `oneshot::channel` 将 MCP 请求投递至 `TextCraftServer`，在 `tick()` 的 `drain_mcp_requests()` 阶段于主线程安全执行。
+  - 执行产生的事件广播与视觉脏版本更新（`*visual-version*`）在同一帧内直接推送给所有在线浏览器玩家，实现 AI 与人类玩家毫秒级同屏交互。
+- **纯文本 ASCII 视口剥离 (`strip_ansi_codes` & `engine:strip-ansi`)**：
+  - 提供 Rust 辅助函数 `strip_ansi_codes(s: &str) -> String` 并注册为 Scheme 宿主函数 `(engine:strip-ansi text)`，自动剔除 `\x1b[...m` 颜色控制序列，为 LLM 提供高信噪比的纯文本 ASCII 视口画面。
+
+### 2. 宿主核心桥接工具：直接复用游戏现有命令与输入系统
+- **`game_command`**：直接复用游戏底部命令输入框管线：
+  - 普通指令（如 `(where)`、`(heal)`、`(say "...")`）路由至 `SchemeLogic::on_command`，并返回执行后该玩家最新的纯文本 ASCII 视口与 HUD 状态；
+  - `!` 前缀指令（如 `! (+ 40 2)`）直接路由至 `SchemeLogic::eval_repl`，在全局环境中求值任意 Scheme 代码并返回结果。
+- **`player_input`**：直接复用 `TextCraftServer::process_player_input`，支持模拟玩家按键（`key`）、UI 交互（`ui`）与鼠标点击（`mouse`），并返回最新纯文本 ASCII 视口与 HUD。
+- **`reload_scripts`**：新增 `SchemeLogic::force_reload()`，无视 `--watch` 开关或轮询间隔，立即重编译 `scripts/` 下的 `.scm` 文件并无损迁移 `*world-state*`（若语法错误则自动回滚状态并返回详细编译错误栈）。
+
+### 3. Scheme 动态可扩展 MCP 工具注册表 (`scripts/prelude.scm` & `scripts/main.scm`)
+- **声明式动态工具注册 (`mcp:def-tool`)**：
+  - 在 `scripts/prelude.scm` 中新增 `*mcp-tools-meta*`、`*mcp-tools-handlers*`、`(mcp:def-tool name description input-schema-hash handler-proc)` 以及生命周期钩子 `(engine:mcp-tools)` 与 `(engine:on-mcp-call name args)`。
+  - AI 与开发者无需重编译 Rust，只需修改 `.scm` 脚本或通过 `game_command` 发送 `! (mcp:def-tool ...)` 即可在运行期自举注册并调用新 MCP 工具。
+- **预置 4 个高频游戏开发与调试 MCP 工具 (`scripts/main.scm`)**：
+  - `get_world_summary`：返回 `tick_count`、`target_fps`、所有玩家摘要与存活怪物列表（自动剔除庞大的 `chunks` 原始瓦片数据）。
+  - `get_viewport`：返回指定玩家的坐标、HUD 状态与去 ANSI 后的纯文本 `ascii_screen`。
+  - `teleport_player`：将指定玩家瞬移至 `(x, y)`，向其 HUD 日志推送 `[mcp] AI 将你传送至 (x, y)` 并触发画面刷新。
+  - `spawn_monster`：在 `(x, y)` 处动态生成新怪物，写入 `*world-state*` 与 `'actor` 图层并向全服广播警告。
+- **新增专项文档与端到端测试**：
+  - 新增 `docs/develop/mcp_developer_guide.md` 开发者与 AI 协同开发指南；
+  - 在 `tests/phase5_verification_test.rs` 中新增 `test_mcp_http_server_command_bridge_and_dynamic_scheme_tools` 全链路集成测试。
 
 ---
 

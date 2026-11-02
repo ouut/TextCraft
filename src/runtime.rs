@@ -121,6 +121,77 @@ pub struct ServerArgs {
     /// Snapshot heartbeat interval in milliseconds (guarantees periodic snapshot even if unchanged; 0 disables deduplication)
     #[arg(long, default_value_t = 1000)]
     pub snapshot_heartbeat_ms: u64,
+
+    /// Optional HTTP port for Model Context Protocol (MCP) JSON-RPC 2.0 server (e.g. 8082)
+    #[arg(long)]
+    pub mcp_port: Option<u16>,
+}
+
+type McpRequestMsg = (
+    serde_json::Value,
+    tokio::sync::oneshot::Sender<serde_json::Value>,
+);
+
+/// Strips ANSI CSI escape sequences (e.g. `\x1b[...m`) from a string,
+/// preserving newlines `\n` and plain character grids for LLM-readable ASCII viewports.
+pub fn strip_ansi_codes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for next_c in chars.by_ref() {
+                    if ('@'..='~').contains(&next_c) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+async fn mcp_http_handler(
+    axum::extract::State(tx): axum::extract::State<
+        tokio::sync::mpsc::UnboundedSender<McpRequestMsg>,
+    >,
+    axum::Json(payload): axum::Json<serde_json::Value>,
+) -> impl axum::response::IntoResponse {
+    let id = payload
+        .get("id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+    if tx.send((payload, resp_tx)).is_err() {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32000,
+                    "message": "TextCraft server is shutting down"
+                }
+            })),
+        );
+    }
+    match resp_rx.await {
+        Ok(resp) => (axum::http::StatusCode::OK, axum::Json(resp)),
+        Err(_) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32603,
+                    "message": "MCP request canceled before completion"
+                }
+            })),
+        ),
+    }
 }
 
 /// Core server gateway and session scheduling coordinator.
@@ -135,6 +206,8 @@ pub struct TextCraftServer {
     last_snapshots: HashMap<PlayerId, (u64, Instant, u64, PlayerSnapshot)>,
     player_tokens: HashMap<PlayerId, String>,
     last_reload_check: Option<Instant>,
+    mcp_rx: Option<tokio::sync::mpsc::UnboundedReceiver<McpRequestMsg>>,
+    mcp_addr: Option<SocketAddr>,
 }
 
 fn hash_json_value<H: Hasher>(val: &serde_json::Value, state: &mut H) {
@@ -188,6 +261,10 @@ impl TextCraftServer {
         .await?;
         server.snapshot_heartbeat_ms = args.snapshot_heartbeat_ms;
         server.log_level = args.log_level;
+        if let Some(mcp_port) = args.mcp_port {
+            let mcp_addr: SocketAddr = format!("{}:{}", args.host, mcp_port).parse()?;
+            server.start_mcp_server(mcp_addr).await?;
+        }
         Ok(server)
     }
 
@@ -218,7 +295,44 @@ impl TextCraftServer {
             last_snapshots: HashMap::new(),
             player_tokens: HashMap::new(),
             last_reload_check: None,
+            mcp_rx: None,
+            mcp_addr: None,
         })
+    }
+
+    /// Starts the lightweight Axum HTTP JSON-RPC 2.0 server for Model Context Protocol (MCP).
+    pub async fn start_mcp_server(
+        &mut self,
+        addr: SocketAddr,
+    ) -> Result<SocketAddr, std::io::Error> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let bound_addr = listener.local_addr()?;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.mcp_rx = Some(rx);
+        self.mcp_addr = Some(bound_addr);
+
+        let router = axum::Router::new()
+            .route("/mcp", axum::routing::post(mcp_http_handler))
+            .route("/", axum::routing::post(mcp_http_handler))
+            .layer(tower_http::cors::CorsLayer::permissive())
+            .with_state(tx);
+
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, router).await {
+                tracing::error!(error = %e, "MCP HTTP server error");
+            }
+        });
+
+        tracing::info!(
+            mcp_addr = %bound_addr,
+            "TextCraft MCP HTTP JSON-RPC 2.0 Server listening"
+        );
+        Ok(bound_addr)
+    }
+
+    /// Returns the bound MCP HTTP socket address if started.
+    pub fn mcp_local_addr(&self) -> Option<SocketAddr> {
+        self.mcp_addr
     }
 
     /// Sets the snapshot heartbeat interval in milliseconds (0 disables deduplication).
@@ -333,6 +447,9 @@ impl TextCraftServer {
                 }
             }
         }
+
+        // 4.5. Drain and execute MCP JSON-RPC 2.0 requests safely on the main simulation thread
+        self.drain_mcp_requests();
 
         // 5. Advance world simulation tick
         let tick_id = self.handle.increment_server_tick();
@@ -528,6 +645,322 @@ impl TextCraftServer {
                     text: "Permission denied: admin token required".to_string(),
                 },
             );
+        }
+    }
+
+    /// Drains all pending MCP JSON-RPC 2.0 requests and executes them on the main simulation thread.
+    pub fn drain_mcp_requests(&mut self) {
+        let mut pending = Vec::new();
+        if let Some(ref mut rx) = self.mcp_rx {
+            while let Ok(req) = rx.try_recv() {
+                pending.push(req);
+            }
+        }
+        for (req_json, resp_tx) in pending {
+            let resp_json = self.handle_mcp_request(req_json);
+            let _ = resp_tx.send(resp_json);
+        }
+    }
+
+    fn host_mcp_tools_schema() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({
+                "name": "game_command",
+                "description": "Execute a TextCraft game command (e.g. '(where)', '(heal)', '(say \"hello\")') or prefix with '!' to evaluate arbitrary Scheme REPL expressions (e.g. '! (+ 40 2)').",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "player_id": {
+                            "type": "integer",
+                            "description": "Target player ID (default: 1)"
+                        },
+                        "command": {
+                            "type": "string",
+                            "description": "Command string or '!' prefixed Scheme REPL expression"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }),
+            serde_json::json!({
+                "name": "player_input",
+                "description": "Simulate player keyboard movement/interaction (KeyW/KeyA/KeyS/KeyD/Space), UI action, or mouse click, and return the updated plain-text ASCII viewport and HUD.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "player_id": {
+                            "type": "integer",
+                            "description": "Target player ID (default: 1)"
+                        },
+                        "type": {
+                            "type": "string",
+                            "enum": ["key", "ui", "mouse"],
+                            "description": "Input category: 'key', 'ui', or 'mouse'"
+                        },
+                        "code": {
+                            "type": "string",
+                            "description": "Key code when type='key' (e.g. 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space')"
+                        },
+                        "action": {
+                            "type": "string",
+                            "description": "UI action name when type='ui' (e.g. 'use_item', 'buy_potion', 'close_dialog')"
+                        },
+                        "payload": {
+                            "type": "object",
+                            "description": "Optional payload object when type='ui'"
+                        },
+                        "x": {
+                            "type": "integer",
+                            "description": "Viewport X coordinate when type='mouse'"
+                        },
+                        "y": {
+                            "type": "integer",
+                            "description": "Viewport Y coordinate when type='mouse'"
+                        },
+                        "button": {
+                            "type": "string",
+                            "description": "Mouse button when type='mouse' (default: 'left')"
+                        }
+                    },
+                    "required": ["type"]
+                }
+            }),
+            serde_json::json!({
+                "name": "reload_scripts",
+                "description": "Force immediate hot-reload of all Scheme (.scm) scripts in scripts/ while preserving *world-state*, returning 'Reloaded successfully' or detailed compilation errors.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }),
+        ]
+    }
+
+    fn handle_mcp_request(&mut self, req: serde_json::Value) -> serde_json::Value {
+        let id = req
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let method = req
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let params = req
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        match method {
+            "initialize" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {
+                            "listChanged": true
+                        }
+                    },
+                    "serverInfo": {
+                        "name": "textcraft-mcp",
+                        "version": "3.1.0"
+                    }
+                }
+            }),
+            "notifications/initialized" | "ping" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {}
+            }),
+            "tools/list" => {
+                let mut tools = Self::host_mcp_tools_schema();
+                if let Ok(serde_json::Value::Array(dynamic_tools)) = self.logic.mcp_list_tools() {
+                    for dt in dynamic_tools {
+                        if let Some(name) = dt.get("name").and_then(|n| n.as_str()) {
+                            if !tools
+                                .iter()
+                                .any(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
+                            {
+                                tools.push(dt);
+                            }
+                        }
+                    }
+                }
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "tools": tools
+                    }
+                })
+            }
+            "tools/call" => {
+                let name = params
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let arguments = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+
+                let (text, is_error) = self.execute_mcp_tool(name, &arguments);
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": text
+                            }
+                        ],
+                        "isError": is_error
+                    }
+                })
+            }
+            _ => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32601,
+                    "message": format!("Method not found: {}", method)
+                }
+            }),
+        }
+    }
+
+    fn execute_mcp_tool(&mut self, name: &str, arguments: &serde_json::Value) -> (String, bool) {
+        match name {
+            "game_command" => {
+                let pid = arguments
+                    .get("player_id")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1);
+                let Some(raw_cmd) = arguments.get("command").and_then(|v| v.as_str()) else {
+                    return ("Missing required string parameter 'command'".to_string(), true);
+                };
+                let trimmed = raw_cmd.trim();
+                if trimmed.starts_with('!') {
+                    let code = trimmed.strip_prefix('!').unwrap_or(trimmed).trim();
+                    match self.logic.eval_repl(code) {
+                        Ok(res) => (res, false),
+                        Err(err) => (err, true),
+                    }
+                } else {
+                    if let Err(err) = self.logic.on_command(pid, trimmed) {
+                        return (err, true);
+                    }
+                    match self.logic.render_snapshot(pid) {
+                        Ok(snap) => {
+                            let out = serde_json::json!({
+                                "player_id": pid,
+                                "command": trimmed,
+                                "ascii_screen": strip_ansi_codes(&snap.screen),
+                                "cols": snap.cols,
+                                "rows": snap.rows,
+                                "hud": snap.hud,
+                            });
+                            (
+                                serde_json::to_string_pretty(&out)
+                                    .unwrap_or_else(|_| out.to_string()),
+                                false,
+                            )
+                        }
+                        Err(err) => (err, true),
+                    }
+                }
+            }
+            "player_input" => {
+                let pid = arguments
+                    .get("player_id")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1);
+                let input_type = arguments
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("key");
+                let input = match input_type {
+                    "key" => PlayerInput::Key {
+                        code: arguments
+                            .get("code")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        shift: arguments
+                            .get("shift")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        ctrl: arguments
+                            .get("ctrl")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        alt: arguments
+                            .get("alt")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                    },
+                    "ui" => PlayerInput::UIAction {
+                        action: arguments
+                            .get("action")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        payload: arguments
+                            .get("payload")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    },
+                    "mouse" => PlayerInput::Mouse {
+                        x: arguments.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                        y: arguments.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                        button: arguments
+                            .get("button")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("left")
+                            .to_string(),
+                    },
+                    other => {
+                        return (format!("Unsupported player_input type: {}", other), true);
+                    }
+                };
+                self.process_player_input(pid, input);
+                match self.logic.render_snapshot(pid) {
+                    Ok(snap) => {
+                        let out = serde_json::json!({
+                            "player_id": pid,
+                            "ascii_screen": strip_ansi_codes(&snap.screen),
+                            "cols": snap.cols,
+                            "rows": snap.rows,
+                            "hud": snap.hud,
+                        });
+                        (
+                            serde_json::to_string_pretty(&out)
+                                .unwrap_or_else(|_| out.to_string()),
+                            false,
+                        )
+                    }
+                    Err(err) => (err, true),
+                }
+            }
+            "reload_scripts" => match self.logic.force_reload() {
+                Ok(()) => ("Reloaded successfully".to_string(), false),
+                Err(err) => (err, true),
+            },
+            _ => match self.logic.mcp_call_tool(name, arguments) {
+                Ok(val) => {
+                    let is_err = val
+                        .get("error")
+                        .is_some_and(|e| !e.is_null() && e != &serde_json::Value::Bool(false));
+                    let text = match val {
+                        serde_json::Value::String(s) => s,
+                        other => serde_json::to_string_pretty(&other)
+                            .unwrap_or_else(|_| other.to_string()),
+                    };
+                    (text, is_err)
+                }
+                Err(err) => (err, true),
+            },
         }
     }
 

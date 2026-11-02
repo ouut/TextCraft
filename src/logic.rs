@@ -103,6 +103,13 @@ impl SchemeLogic {
             },
         );
 
+        app.engine.register_fn(
+            "engine:strip-ansi",
+            move |text: SteelVal| -> String {
+                crate::runtime::strip_ansi_codes(&steel_to_string(&text))
+            },
+        );
+
         // Register safe datum parser helper (uses Scheme Reader only, never evals)
         let _ = app.engine.run(
             r#"
@@ -437,6 +444,61 @@ impl SchemeLogic {
         Ok(true)
     }
 
+    /// Force immediate reload of all root `.scm` scripts in `scripts_dir` while preserving `*world-state*`.
+    /// Ignores `watch_scripts` setting and file modification timestamps.
+    pub fn force_reload(&mut self) -> Result<(), String> {
+        tracing::info!(
+            scripts_dir = %self.scripts_dir.display(),
+            "Forcing immediate reload of Scheme scripts..."
+        );
+        let state = self.export_state().ok();
+
+        let entries = std::fs::read_dir(&self.scripts_dir)
+            .map_err(|e| format!("Failed to read scripts directory: {}", e))?;
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|entry| entry.path()))
+            .filter(|f| f.is_file() && f.extension().is_some_and(|ext| ext == "scm"))
+            .collect();
+        sort_script_files(&mut files);
+
+        // Read all target files first before running any compilation
+        let mut sources = Vec::with_capacity(files.len());
+        for file in files {
+            let code = std::fs::read_to_string(&file)
+                .map_err(|e| format!("Failed to read {}: {}", file.display(), e))?;
+            sources.push((file, code));
+        }
+
+        for (file, code) in sources {
+            if let Err(e) = self
+                .app
+                .engine
+                .compile_and_run_raw_program_with_path(code, file.clone())
+            {
+                tracing::warn!(
+                    file = %file.display(),
+                    error = %e,
+                    "Failed to compile script during reload, restoring state"
+                );
+                if let Some(st) = state {
+                    let _ = self.import_state(&st);
+                }
+                return Err(format!("Failed to compile {}: {}", file.display(), e));
+            }
+        }
+
+        if let Some(st) = state {
+            let _ = self.import_state(&st);
+        }
+        if let Some(ref mut watcher) = self.watcher {
+            let _ = watcher.check_modified();
+        }
+        self.extra_version = self.extra_version.wrapping_add(1);
+
+        tracing::info!("Scripts reloaded successfully with state preserved");
+        Ok(())
+    }
+
     /// Check if watched `.scm` script files have been modified and reload with state preservation.
     pub fn check_reload(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
         let is_modified = if let Some(ref mut watcher) = self.watcher {
@@ -451,54 +513,32 @@ impl SchemeLogic {
 
         if is_modified {
             tracing::info!("Script changes detected, reloading scripts...");
-            let state = self.export_state().ok();
-            let mut files: Vec<PathBuf> = self
-                .watcher
-                .as_ref()
-                .map(|w| w.tracked_files())
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|f| {
-                    f.parent() == Some(self.scripts_dir.as_path())
-                        && f.extension().is_some_and(|ext| ext == "scm")
-                })
-                .collect();
-            sort_script_files(&mut files);
-
-            // Read all target files first before running any compilation
-            let mut sources = Vec::with_capacity(files.len());
-            for file in files {
-                let code = std::fs::read_to_string(&file)?;
-                sources.push((file, code));
-            }
-
-            for (file, code) in sources {
-                if let Err(e) = self
-                    .app
-                    .engine
-                    .compile_and_run_raw_program_with_path(code, file.clone())
-                {
-                    tracing::warn!(
-                        file = %file.display(),
-                        error = %e,
-                        "Failed to compile script during hot reload, restoring state"
-                    );
-                    if let Some(st) = state {
-                        let _ = self.import_state(&st);
-                    }
-                    return Err(Box::new(std::io::Error::other(e.to_string())));
-                }
-            }
-
-            if let Some(st) = state {
-                let _ = self.import_state(&st);
-            }
-            self.extra_version = self.extra_version.wrapping_add(1);
-
-            tracing::info!("Scripts reloaded successfully with state preserved");
+            self.force_reload()
+                .map_err(|e| Box::new(std::io::Error::other(e)))?;
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// Query dynamically registered MCP tools from Scheme via `(engine:mcp-tools)`.
+    pub fn mcp_list_tools(&mut self) -> Result<Value, String> {
+        let val = self
+            .app
+            .safe_call_function("engine:mcp-tools", vec![], 500)
+            .map_err(|e| format!("engine:mcp-tools error: {}", e))?;
+        steel_val_to_json(&val).map_err(|e| format!("mcp_list_tools json error: {}", e))
+    }
+
+    /// Invoke a Scheme MCP tool handler via `(engine:on-mcp-call name args)`.
+    pub fn mcp_call_tool(&mut self, name: &str, args: &Value) -> Result<Value, String> {
+        self.extra_version = self.extra_version.wrapping_add(1);
+        let args_val = json_to_steel_val(args);
+        let call_args = vec![SteelVal::StringV(name.to_string().into()), args_val];
+        let val = self
+            .app
+            .safe_call_function("engine:on-mcp-call", call_args, 1000)
+            .map_err(|e| format!("engine:on-mcp-call error: {}", e))?;
+        steel_val_to_json(&val).map_err(|e| format!("mcp_call_tool json error: {}", e))
     }
 
     /// Drain all queued outbound messages emitted by host functions.

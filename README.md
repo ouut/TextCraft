@@ -79,11 +79,12 @@ TextCraft/
   ├── build.ps1                     # 本地打包脚本 (Windows PowerShell)
   └── docs/
       ├── develop/
-      │   └── agent_developer_guide.md # 游戏 (Scheme) 与前端 (HUD SDK) Agent 开发者综合指南
+      │   ├── agent_developer_guide.md # 游戏 (Scheme) 与前端 (HUD SDK) Agent 开发者综合指南
+      │   └── mcp_developer_guide.md   # MCP (Model Context Protocol) 开发者与 AI 协同开发指南
       └── project/                  # 本项目（引擎宿主）开发文档
           ├── specification_3.0.0.md # 引擎 3.0 架构与技术规范
           ├── agents_3.0.0.md       # 引擎开发多智能体协作规范
-          └── changelog.md          # 版本演进与架构变更日志 (v3.0.0 -> v3.1.0)
+          └── changelog.md          # 版本演进与架构变更日志 (v3.0.0 -> v3.2.0)
 ```
 
 ---
@@ -160,6 +161,9 @@ cargo run --release -- \
 cargo run -- \
   --admin-token my_super_secret \
   --time-scale 2.0
+
+# 7. 开启 AI 协同开发 MCP HTTP JSON-RPC 2.0 服务端 (监听 8082 端口 + 2s 热重载)
+cargo run -- --port 8081 --mcp-port 8082 -w --log-level debug
 ```
 
 #### CLI 完整参数说明表：
@@ -168,6 +172,7 @@ cargo run -- \
 |---|---|---|---|---|
 | `--host <ip>` | `host` | `String` | `0.0.0.0` | 绑定监听地址。`0.0.0.0` 允许本机与局域网设备同时访问 |
 | `--port <port>` | `port` | `u16` | `8081` | 监听 HTTP Web 资源与 WebSocket 网关服务端口 |
+| `--mcp-port <port>` | `mcp_port` | `Option<u16>` | `None` | 可选的 MCP (Model Context Protocol) HTTP JSON-RPC 2.0 监听端口（如 `8082`，详见 [`docs/develop/mcp_developer_guide.md`](docs/develop/mcp_developer_guide.md)） |
 | `--scripts-dir <path>` | `scripts_dir` | `PathBuf` | `scripts` | Scheme 脚本所在目录（必须包含 `prelude.scm` 与 `main.scm`） |
 | `-w, --watch` | `watch` | `bool` | `false` | 开启 Scheme 脚本自动热重载监控（每 2 秒轮询一次，修改保存后无损状态自动重载；默认关闭零开销） |
 | `--log-level <level>` | `log_level` | `LogLevel` | `info` | 日志输出级别（枚举：`error`、`warn`、`info`、`debug`、`trace`；若显式设置 `RUST_LOG` 环境变量则优先遵循 `RUST_LOG`） |
