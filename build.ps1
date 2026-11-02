@@ -81,6 +81,8 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 
 Copy-Item $binSource -Destination "$stagingDir\server.exe"
 Copy-Item -Recurse "scripts" -Destination "$stagingDir\"
+New-Item -ItemType Directory -Path "$stagingDir\docs" -Force | Out-Null
+Copy-Item -Recurse "docs\develop" -Destination "$stagingDir\docs\"
 Copy-Item "README.md" -Destination "$stagingDir\"
 
 if ($NoArchive) {

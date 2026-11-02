@@ -230,6 +230,10 @@ chmod +x "${STAGING_DIR}/server${EXE_SUFFIX}" || true
 echo -e "  -> 复制 Scheme 脚本库: scripts/"
 cp -r "${SCRIPT_DIR}/scripts" "${STAGING_DIR}/"
 
+echo -e "  -> 复制开发者文档: docs/develop/"
+mkdir -p "${STAGING_DIR}/docs"
+cp -r "${SCRIPT_DIR}/docs/develop" "${STAGING_DIR}/docs/"
+
 echo -e "  -> 复制说明文档: README.md"
 cp "${SCRIPT_DIR}/README.md" "${STAGING_DIR}/"
 

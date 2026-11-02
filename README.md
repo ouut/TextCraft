@@ -263,11 +263,15 @@ GitHub Actions CI 流水线为 Linux、macOS 与 Windows 构建开箱即用的�
 解压后包内目录结构如下：
 ```text
 textcraft/
-  ├── server (.exe)         # 单二进制独立运行程序
-  ├── scripts/              # Scheme 核心引擎脚本
+  ├── server (.exe)                  # 单二进制独立运行程序
+  ├── scripts/                       # Scheme 核心引擎脚本
   │   ├── prelude.scm
   │   └── main.scm
-  └── README.md             # 使用说明
+  ├── docs/                          # 开发者文档
+  │   └── develop/
+  │       ├── agent_developer_guide.md
+  │       └── mcp_developer_guide.md
+  └── README.md                      # 使用说明
 ```
 
 启动命令：
