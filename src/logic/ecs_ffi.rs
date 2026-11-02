@@ -422,7 +422,88 @@ pub fn register_ecs_primitives(
     });
 
     // ------------------------------------------------------------------------
-    // 6. Scheme Case-Lambda Variadic DSL Bridges
+    // 6. Roguelike Universal Mathematical Operators (FOV, A*, Dijkstra, Noise)
+    // ------------------------------------------------------------------------
+    let e_fov = Arc::clone(&ecs);
+    engine.register_fn(
+        "ecs:fov",
+        move |cx: isize, cy: isize, radius: isize| -> SteelVal {
+            let vis = e_fov.lock().fov(cx as i32, cy as i32, radius as i32);
+            let coords: Vec<SteelVal> = vis
+                .into_iter()
+                .map(|(x, y)| {
+                    SteelVal::ListV(vec![SteelVal::IntV(x as isize), SteelVal::IntV(y as isize)].into())
+                })
+                .collect();
+            SteelVal::ListV(coords.into())
+        },
+    );
+
+    let e_path = Arc::clone(&ecs);
+    engine.register_fn(
+        "__ecs:find-path",
+        move |sx: isize, sy: isize, gx: isize, gy: isize, allow_diag: bool| -> SteelVal {
+            match e_path.lock().find_path((sx as i32, sy as i32), (gx as i32, gy as i32), allow_diag) {
+                Some(path) => {
+                    let steps: Vec<SteelVal> = path
+                        .into_iter()
+                        .map(|(x, y)| {
+                            SteelVal::ListV(vec![SteelVal::IntV(x as isize), SteelVal::IntV(y as isize)].into())
+                        })
+                        .collect();
+                    SteelVal::ListV(steps.into())
+                }
+                None => SteelVal::BoolV(false),
+            }
+        },
+    );
+
+    let e_dijkstra = Arc::clone(&ecs);
+    engine.register_fn(
+        "__ecs:dijkstra-map",
+        move |tx: isize, ty: isize, max_dist: isize, allow_diag: bool| -> SteelVal {
+            let map = e_dijkstra
+                .lock()
+                .dijkstra_map((tx as i32, ty as i32), max_dist.max(0) as u32, allow_diag);
+            let mut entries = steel::HashMap::new();
+            for ((x, y), dist) in map {
+                let key = format!("{},{}", x, y);
+                entries.insert(SteelVal::StringV(key.into()), SteelVal::IntV(dist as isize));
+            }
+            SteelVal::HashMapV(Gc::new(entries).into())
+        },
+    );
+
+    engine.register_fn(
+        "ecs:noise-2d",
+        move |seed: isize, x: f64, y: f64, scale: f64| -> f64 {
+            EcsWorld::noise_2d(seed as u64, x, y, scale)
+        },
+    );
+
+    engine.register_fn(
+        "ecs:generate-cave",
+        move |width: isize, height: isize, wall_prob: f64, iterations: isize, seed: isize| -> SteelVal {
+            let cave = EcsWorld::generate_cave(
+                width as usize,
+                height as usize,
+                wall_prob,
+                iterations as usize,
+                seed as u64,
+            );
+            let rows: Vec<SteelVal> = cave
+                .into_iter()
+                .map(|r| {
+                    let cols: Vec<SteelVal> = r.into_iter().map(SteelVal::BoolV).collect();
+                    SteelVal::ListV(cols.into())
+                })
+                .collect();
+            SteelVal::ListV(rows.into())
+        },
+    );
+
+    // ------------------------------------------------------------------------
+    // 7. Scheme Case-Lambda Variadic DSL Bridges
     // ------------------------------------------------------------------------
     let bridge_code = r#"
     (define ecs:spawn
@@ -439,6 +520,16 @@ pub fn register_ecs_primitives(
       (case-lambda
         ((x y) (__ecs:at x y))
         ((x y layer) (__ecs:at-layer x y layer))))
+
+    (define ecs:find-path
+      (case-lambda
+        ((sx sy gx gy) (__ecs:find-path sx sy gx gy #f))
+        ((sx sy gx gy allow-diag) (__ecs:find-path sx sy gx gy allow-diag))))
+
+    (define ecs:dijkstra-map
+      (case-lambda
+        ((tx ty max-dist) (__ecs:dijkstra-map tx ty max-dist #f))
+        ((tx ty max-dist allow-diag) (__ecs:dijkstra-map tx ty max-dist allow-diag))))
     "#;
     engine
         .run(bridge_code.to_string())

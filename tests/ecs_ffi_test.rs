@@ -262,3 +262,28 @@ fn test_render_snapshot_with_native_rasterizer() {
     assert!(snap.screen.contains('@'));
     assert!(snap.screen.contains('#'));
 }
+
+#[test]
+fn test_ecs_ffi_math_operators() {
+    let dir = get_scripts_dir();
+    let mut logic = SchemeLogic::new(&dir, false, None).expect("SchemeLogic creation failed");
+    logic.init().expect("SchemeLogic init failed");
+
+    // 1. (ecs:fov origin-x origin-y radius)
+    let fov_res = eval_str(&mut logic, "(length (ecs:fov 0 0 5))");
+    let count: isize = fov_res.parse().unwrap();
+    assert!(count > 10);
+
+    // 2. (ecs:find-path start-x start-y end-x end-y)
+    let path_res = eval_str(&mut logic, "(ecs:find-path 0 0 3 0)");
+    assert_eq!(path_res, "((0 0) (1 0) (2 0) (3 0))");
+
+    // 3. (ecs:noise-2d seed x y scale)
+    let noise_val = eval_str(&mut logic, "(ecs:noise-2d 42 10.5 20.5 0.1)");
+    let n: f64 = noise_val.parse().unwrap();
+    assert!((-1.0..=1.0).contains(&n));
+
+    // 4. (ecs:generate-cave width height wall-prob iterations seed)
+    let cave_rows = eval_str(&mut logic, "(length (ecs:generate-cave 20 10 0.45 4 12345))");
+    assert_eq!(cave_rows, "10");
+}
