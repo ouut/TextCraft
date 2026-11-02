@@ -200,6 +200,24 @@ impl SchemeLogic {
         Ok(())
     }
 
+    /// Handle player disconnect (entering grace period) `(engine:on-player-disconnect pid)`.
+    pub fn on_player_disconnect(&mut self, pid: u64) -> Result<(), String> {
+        let args = vec![SteelVal::IntV(pid as isize)];
+        self.app
+            .safe_call_function("engine:on-player-disconnect", args, 500)
+            .map_err(|e| format!("engine:on-player-disconnect error: {}", e))?;
+        Ok(())
+    }
+
+    /// Handle player reconnect (resuming within grace period) `(engine:on-player-reconnect pid)`.
+    pub fn on_player_reconnect(&mut self, pid: u64) -> Result<(), String> {
+        let args = vec![SteelVal::IntV(pid as isize)];
+        self.app
+            .safe_call_function("engine:on-player-reconnect", args, 500)
+            .map_err(|e| format!("engine:on-player-reconnect error: {}", e))?;
+        Ok(())
+    }
+
     /// Handle player leave event `(engine:on-player-leave pid)`.
     pub fn on_player_leave(&mut self, pid: u64) -> Result<(), String> {
         let args = vec![SteelVal::IntV(pid as isize)];

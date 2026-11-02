@@ -146,8 +146,11 @@ Rust 宿主在 Scheme 全局环境中注册了 4 个原生函数，任何脚本�
 ```scheme
 (hash
   "id" 1                   ;; 当前连接的临时 PlayerId (整数)
-  "token" "player_abc"     ;; 客户端认证 Token (用于 saved_players 跨会话存档索引)
-  "name" "Hero#1"          ;; 角色名称
+  "token" "alice:admin"    ;; 客户端握手原始 Token (支持 "username:auth_token" 或旧版纯 token)
+  "auth_token" "admin"     ;; 解析出的权限校验 Token (用于管理员 REPL 鉴权)
+  "identity_key" "alice"   ;; 角色唯一身份与 saved_players 存档归档 Key (优先取 username)
+  "name" "alice"           ;; 角色显示名称 (同步至 HUD 顶部状态栏)
+  "online" #t              ;; 显式在线状态位 (#t 在线 / #f 断线宽限期挂起，用于过滤渲染与怪物索敌)
   "theme" "cyberpunk"      ;; 玩家主题偏好
   "double_width" #f        ;; 玩家个人双宽字符模式开关 (#t / #f)
   "x" 0                    ;; 世界 X 坐标 (整数)
@@ -236,8 +239,10 @@ Rust 宿主在 Scheme 全局环境中注册了 4 个原生函数，任何脚本�
 | `(engine:target-fps)` | 每帧调度计算前 | 返回整数 `1 ~ 60`，控制宿主主循环节拍（活动时 `60`，空闲 >2s 降为 `30`，空闲 >5s 降为 `15`） |
 | `(engine:viewport-size pid)` | 渲染快照时 | 返回 `(list cols rows)`，默认 `'(80 24)` |
 | `(engine:hud-config)` | 主题配置查询 | 返回全局 HUD 默认配置字典 |
-| `(engine:on-player-join pid token)` | 玩家首次认证入场 | 若 `saved_players` 中有该 `token` 的存档则恢复角色并重绑 `pid`，否则创建新角色 |
-| `(engine:on-player-leave pid)` | 会话宽限期超时终止 | 调用 `(remove-player pid)` 清理在线实例（注意：普通断线进入 60s 宽限期时不会误触此函数） |
+| `(engine:on-player-join pid token)` | 玩家首次认证入场 | 解析 `username:token`，清理同 `identity_key` 的旧 `pid`，从 `saved_players` 恢复或新建角色并置 `"online" #t` |
+| `(engine:on-player-disconnect pid)` | 玩家断线进入 60s 宽限期 | 将玩家 `"online"` 设为 `#f`（保留内存态，立即从他人视口与怪物索敌中隐藏，不删档、不刷屏） |
+| `(engine:on-player-reconnect pid)` | 宽限期内恢复连接 | 将玩家 `"online"` 设为 `#t` 并递增视觉版本号（无需重复走 `join` 或刷欢迎日志） |
+| `(engine:on-player-leave pid)` | 会话宽限期超时终止 | 调用 `(remove-player pid)` 归档至 `saved_players` 并从活跃表 `"players"` 物理移除 |
 | `(engine:on-tick dt tick-id)` | 主循环第 5 阶段 | 累加时钟与空闲计时器，动态调节 FPS，每 N 帧执行怪物就近索敌、X/Y 寻路与攻击结算 |
 | `(engine:on-input pid input-map)` | 主循环第 3/4 阶段 | 处理键盘按键（`"type": "key"`）与视口鼠标点击（`"type": "mouse"`），重置空闲计时器 |
 | `(engine:on-ui-action pid action-map)`| 主循环第 3/4 阶段 | 处理前端 HUD 发送的交互动作（如 `"use_item"`, `"buy_potion"`, `"close_dialog"`, `"clear_logs"`） |
@@ -437,8 +442,8 @@ TextCraft.sendMouse(10, 5, 'left');
 
 1. **保存即热重载（零重启）**：
    服务端默认开启脚本监控（每 500ms 轻量检查一次 `scripts/` 根目录下的 `.scm` 修改时间）。修改 `scripts/prelude.scm` 或 `scripts/main.scm` 保存后，宿主会自动调用 `(engine:export-state)` 备份当前所有分块与玩家数据，重编译脚本后再通过 `(engine:import-state)` 无缝恢复（若新脚本存在语法错误，宿主会自动回滚状态并保留旧环境运行，不会崩溃）。
-2. **管理员 `!` REPL 在线求值**：
-   在浏览器 URL 后附带管理员 Token（默认 `?token=admin`），在底部命令框输入 `!` 开头的任意 Scheme 代码即可直接操作线上世界：
+2. **管理员 `!` REPL 在线求值与多用户 URL 路由**：
+   前端支持 `#/username` 与 `#/username/token` 路由（例如 `http://127.0.0.1:8081/#/alice` 或 `http://127.0.0.1:8081/#/bob/admin`，也兼容 `?user=bob&token=admin` 或 `?token=admin`）。当 URL 显式指定身份时不会覆盖 `localStorage`，方便单浏览器多开标签页联机调试。携带管理员 Token（默认 `admin`）后，在底部命令框输入 `!` 开头的任意 Scheme 代码即可直接操作线上世界：
    - `! (get-player 1)` $\rightarrow$ 查看玩家 1 的完整 Hash 数据
    - `! (set-player 1 (hash-insert (ensure-player 1) "gold" 9999))` $\rightarrow$ 在线修改玩家金币
    - `! (world:set-tile 1 0 'surface (hash "glyph" "$" "fg" '(255 215 0) "bg" #f "solid" #f "name" "gold_coins" "meta" (hash "amount" 500)))` $\rightarrow$ 在 `(1, 0)` 坐标动态刷出一堆 500 金币

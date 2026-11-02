@@ -284,26 +284,88 @@
       }
 
       /* ======================================================================
-         3. WebSocket Connection & Heartbeat Loop
+         3. Client Identity Routing (#/username/token) & WebSocket Loop
          ====================================================================== */
       const connTextEl = document.getElementById('conn-text');
       const fpsValEl = document.getElementById('fps-val');
+      const playerTitleEl = document.getElementById('player-title');
 
-      function resolveClientToken() {
-        const urlToken = new URLSearchParams(window.location.search).get('token');
-        if (urlToken) return urlToken;
-        try {
-          let saved = sessionStorage.getItem('textcraft_token');
-          if (!saved) {
-            saved = 'player_' + Math.random().toString(36).substring(2, 10);
-            sessionStorage.setItem('textcraft_token', saved);
-          }
-          return saved;
-        } catch (_) {
-          return 'player_' + Math.random().toString(36).substring(2, 10);
+      function resolveClientIdentity() {
+        let username = '';
+        let token = '';
+        let fromUrl = false;
+
+        // 1. Hash route (recommended): #/username or #/username/token
+        const rawHash = (window.location.hash || '').replace(/^#\/?/, '').trim();
+        if (rawHash) {
+          const parts = rawHash.split('/');
+          username = decodeURIComponent(parts[0] || '').trim();
+          token = decodeURIComponent(parts.slice(1).join('/') || '').trim();
+          fromUrl = true;
         }
+
+        // 2. Query path shorthand: ?/username or ?/username/token
+        if (!fromUrl && window.location.search.startsWith('?/')) {
+          const rawSearchPath = window.location.search.slice(2).trim();
+          if (rawSearchPath) {
+            const parts = rawSearchPath.split('/');
+            username = decodeURIComponent(parts[0] || '').trim();
+            token = decodeURIComponent(parts.slice(1).join('/') || '').trim();
+            fromUrl = true;
+          }
+        }
+
+        // 3. Standard query parameters: ?user=xxx&token=yyy or ?username=xxx or ?token=yyy
+        if (!fromUrl && window.location.search) {
+          const params = new URLSearchParams(window.location.search);
+          const qUser = (params.get('user') || params.get('username') || '').trim();
+          const qToken = (params.get('token') || '').trim();
+          if (qUser || qToken) {
+            username = qUser;
+            token = qToken;
+            fromUrl = true;
+          }
+        }
+
+        // 4. Pathname fallback: /username or /username/token
+        if (!fromUrl && window.location.pathname && window.location.pathname !== '/' && window.location.pathname !== '/index.html') {
+          const cleanPath = window.location.pathname.replace(/^\/+|\/+$/g, '');
+          if (cleanPath) {
+            const parts = cleanPath.split('/');
+            username = decodeURIComponent(parts[0] || '').trim();
+            token = decodeURIComponent(parts.slice(1).join('/') || '').trim();
+            fromUrl = true;
+          }
+        }
+
+        // 5. Default fallback to localStorage when URL does not specify identity
+        if (!fromUrl) {
+          try {
+            let savedUser = localStorage.getItem('textcraft_user');
+            if (!savedUser) {
+              savedUser = 'Hero_' + Math.random().toString(36).substring(2, 6);
+              localStorage.setItem('textcraft_user', savedUser);
+            }
+            username = savedUser;
+            token = localStorage.getItem('textcraft_token') || '';
+          } catch (_) {
+            username = 'Hero_' + Math.random().toString(36).substring(2, 6);
+            token = '';
+          }
+        }
+
+        // Handshake token encoding:
+        // - Legacy ?token=xxx without username keeps raw token `xxx`
+        // - With username, encodes as `${username}:${token}` (e.g. "alice:" or "alice:admin")
+        const handshakeToken = username ? `${username}:${token}` : token;
+        return { username, token, handshakeToken, fromUrl };
       }
-      const clientToken = resolveClientToken();
+
+      let clientIdentity = resolveClientIdentity();
+      if (clientIdentity.username && playerTitleEl) {
+        playerTitleEl.textContent = clientIdentity.username;
+      }
+      TextCraft.resolveClientIdentity = resolveClientIdentity;
 
       function connectWebSocket() {
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -313,7 +375,7 @@
         }
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host || 'localhost:8081';
-        const token = clientToken;
+        const token = clientIdentity.handshakeToken;
         connTextEl.textContent = '连接中...';
 
         try {
@@ -390,7 +452,6 @@
       const mpTextEl = document.getElementById('mp-text');
       const badgeLevelEl = document.getElementById('badge-level');
       const badgeGoldEl = document.getElementById('badge-gold');
-      const playerTitleEl = document.getElementById('player-title');
       const inventoryGridEl = document.getElementById('inventory-grid');
       const invCountBadgeEl = document.getElementById('inv-count-badge');
       const logContainerEl = document.getElementById('log-container');
@@ -559,6 +620,17 @@
           e.preventDefault();
         }
         TextCraft.sendKey(e.code, { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
+      });
+
+      window.addEventListener('hashchange', () => {
+        clientIdentity = resolveClientIdentity();
+        if (clientIdentity.username && playerTitleEl) {
+          playerTitleEl.textContent = clientIdentity.username;
+        }
+        lastInvJson = '';
+        lastHudLogs = [];
+        logContainerEl.innerHTML = '';
+        connectWebSocket();
       });
 
       window.addEventListener('beforeunload', () => {

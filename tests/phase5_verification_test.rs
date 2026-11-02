@@ -143,13 +143,16 @@ async fn test_task_5_1_admin_disconnect_grace_period_and_reconnect() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     server.tick(0.016).unwrap();
 
-    // Verify disconnected character is removed from active `players` (no ghost on map)
-    // and safely persisted in `saved_players` by token during the grace period!
+    // Verify disconnected character stays in `players` with `online == false` (no ghost on map for others)
+    // and is also safely persisted in `saved_players` by token during the grace period!
     let state_during_grace = server.logic.export_state().unwrap();
-    assert!(
-        state_during_grace["players"].get(&pid_str).is_none(),
-        "Disconnected player must be removed from active 'players' map so no ghost character lingers"
+    assert_eq!(
+        state_during_grace["players"][&pid_str]["online"],
+        false,
+        "Disconnected player must remain in 'players' with online=false during grace period"
     );
+    assert_eq!(state_during_grace["players"][&pid_str]["x"], 1);
+    assert_eq!(state_during_grace["players"][&pid_str]["gold"], 777);
     assert_eq!(state_during_grace["saved_players"][&admin_secret]["x"], 1);
     assert_eq!(state_during_grace["saved_players"][&admin_secret]["gold"], 777);
 
@@ -161,6 +164,14 @@ async fn test_task_5_1_admin_disconnect_grace_period_and_reconnect() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     server.tick(0.016).unwrap();
+
+    // Verify online flag is flipped back to true after reconnect
+    let state_after_reconn = server.logic.export_state().unwrap();
+    assert_eq!(
+        state_after_reconn["players"][&pid_str]["online"],
+        true,
+        "Reconnected player must have online=true"
+    );
 
     // Verify reconnected client receives AuthSuccess (same pid), Welcome back event, and immediate Snapshot
     let mut reconn_pid = None;
@@ -481,7 +492,7 @@ fn test_task_5_2_ui_sync_and_say_broadcast() {
             entry["channel"] == "chat"
                 && entry["text"]
                     .as_str()
-                    .is_some_and(|t| t.contains("Hero#1") && t.contains("hello"))
+                    .is_some_and(|t| (t.contains("Hero_1") || t.contains("Hero#1")) && t.contains("hello"))
         });
         assert!(
             has_chat,
@@ -494,7 +505,7 @@ fn test_task_5_2_ui_sync_and_say_broadcast() {
     let outbound = logic.drain_outbound_messages();
     let has_broadcast = outbound.iter().any(|msg| match msg {
         OutboundMessage::Broadcast { channel, text } => {
-            channel == "chat" && text.contains("Hero#1") && text.contains("hello")
+            channel == "chat" && (text.contains("Hero_1") || text.contains("Hero#1")) && text.contains("hello")
         }
         _ => false,
     });
@@ -502,6 +513,151 @@ fn test_task_5_2_ui_sync_and_say_broadcast() {
         has_broadcast,
         "Outbound queue should contain OutboundMessage::Broadcast for chat"
     );
+}
+
+/// Task 5.1 (Part C): 验证 URL 多用户 `username:token`（如 `"alice:"` 与 `"bob:admin"`）的身份解析、
+/// 管理员权限校验（留空 Token 无权限、匹配 Admin Token 有权限），以及断线宽限期内 `online = #f` 杜绝其他玩家视口中的离线幽灵残影。
+#[tokio::test]
+async fn test_task_5_1_multi_user_url_token_routing_and_offline_ghost_filtering() {
+    let scripts_dir = get_scripts_dir();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let config = ServerConfig::new(addr).with_embedded_assets(&EMBEDDED_WEB_ASSETS);
+    let mut logic = SchemeLogic::new(&scripts_dir, false, None).unwrap();
+    logic.init().unwrap();
+
+    let mut server =
+        TextCraftServer::start_with_config(config, logic, "admin".to_string(), 1.0, 0)
+            .await
+            .unwrap()
+            .with_snapshot_heartbeat_ms(0);
+
+    let local_addr = server.local_addr();
+    let ws_url = format!("ws://{}/ws", local_addr);
+
+    // 1. Connect Alice (`#/alice` -> handshake token `"alice:"`) and Bob (`#/bob/admin` -> `"bob:admin"`)
+    let (mut ws_alice, _) = connect_async(&ws_url).await.unwrap();
+    ws_alice
+        .send(Message::Text(
+            DualCodec::encode_text(&ClientEnvelope::<PlayerInput, TextCraftCommand>::Auth {
+                token: "alice:".to_string(),
+                client_version: "3.0.0".to_string(),
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let (mut ws_bob, _) = connect_async(&ws_url).await.unwrap();
+    ws_bob
+        .send(Message::Text(
+            DualCodec::encode_text(&ClientEnvelope::<PlayerInput, TextCraftCommand>::Auth {
+                token: "bob:admin".to_string(),
+                client_version: "3.0.0".to_string(),
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    server.tick(0.016).unwrap();
+
+    let mut alice_pid = None;
+    let mut alice_snap = None;
+    for _ in 0..5 {
+        if let Ok(Some(env)) =
+            tokio::time::timeout(Duration::from_millis(200), read_next_envelope(&mut ws_alice))
+                .await
+        {
+            match env {
+                ServerEnvelope::AuthSuccess { player_id, .. } => alice_pid = Some(player_id),
+                ServerEnvelope::Snapshot(s) => alice_snap = Some(s),
+                _ => {}
+            }
+        }
+        if alice_pid.is_some() && alice_snap.is_some() {
+            break;
+        }
+    }
+    let alice_id = alice_pid.expect("Alice should authenticate");
+    let alice_initial_snap = alice_snap.expect("Alice should receive initial snapshot");
+    assert_eq!(alice_initial_snap.hud["name"], "alice");
+
+    let mut bob_pid = None;
+    let mut bob_snap = None;
+    for _ in 0..5 {
+        if let Ok(Some(env)) =
+            tokio::time::timeout(Duration::from_millis(200), read_next_envelope(&mut ws_bob)).await
+        {
+            match env {
+                ServerEnvelope::AuthSuccess { player_id, .. } => bob_pid = Some(player_id),
+                ServerEnvelope::Snapshot(s) => bob_snap = Some(s),
+                _ => {}
+            }
+        }
+        if bob_pid.is_some() && bob_snap.is_some() {
+            break;
+        }
+    }
+    let bob_id = bob_pid.expect("Bob should authenticate");
+    let bob_initial_snap = bob_snap.expect("Bob should receive initial snapshot");
+    assert_eq!(bob_initial_snap.hud["name"], "bob");
+
+    // Verify saved_players indexed by username ("alice" and "bob")
+    let state = server.logic.export_state().unwrap();
+    assert_eq!(state["saved_players"]["alice"]["name"], "alice");
+    assert_eq!(state["saved_players"]["bob"]["name"], "bob");
+    assert!(!server.is_admin_authorized(alice_id), "alice: must not have admin rights");
+    assert!(server.is_admin_authorized(bob_id), "bob:admin must have admin rights");
+
+    // 2. Move Bob East to (1, 0) so Alice at (0, 0) can see Bob's blue `@` (`\x1b[38;2;100;200;255m`)
+    ws_bob
+        .send(Message::Text(
+            DualCodec::encode_text(&ClientEnvelope::<PlayerInput, TextCraftCommand>::Input(
+                PlayerInput::Key {
+                    code: "KeyD".to_string(),
+                    shift: false,
+                    ctrl: false,
+                    alt: false,
+                },
+            ))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    server.tick(0.016).unwrap();
+
+    let snap_alice_with_bob_online = server.logic.render_snapshot(alice_id).unwrap();
+    assert!(
+        snap_alice_with_bob_online
+            .screen
+            .contains("\x1b[38;2;100;200;255m"),
+        "Online Bob at (1,0) should be rendered in Alice's viewport with other-player fg color (100,200,255)"
+    );
+
+    // 3. Bob disconnects (enters grace period -> online = false)
+    drop(ws_bob);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    server.tick(0.016).unwrap();
+
+    let state_grace = server.logic.export_state().unwrap();
+    assert_eq!(
+        state_grace["players"][&bob_id.to_string()]["online"],
+        false,
+        "Disconnected Bob must have online=false"
+    );
+
+    // Verify Bob's offline ghost is immediately hidden from Alice's viewport!
+    let snap_alice_with_bob_offline = server.logic.render_snapshot(alice_id).unwrap();
+    assert!(
+        !snap_alice_with_bob_offline
+            .screen
+            .contains("\x1b[38;2;100;200;255m"),
+        "Offline Bob in grace period must NOT appear as a ghost in Alice's viewport"
+    );
+
+    server.handle.shutdown();
 }
 
 // ============================================================================

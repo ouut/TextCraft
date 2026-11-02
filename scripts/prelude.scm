@@ -137,33 +137,97 @@
   (bump-visual-version!))
 
 ;; ----------------------------------------------------------------------------
-;; Player State Helpers
+;; Identity & Player State Helpers
 ;; ----------------------------------------------------------------------------
 
-(define (make-default-player player-id token)
-  (hash
-    "id" player-id
-    "token" (if (string? token) token (to-string token))
-    "name" (string-append "Hero#" (to-string player-id))
-    "theme" "cyberpunk"
-    "double_width" #f
-    "x" 0
-    "y" 0
-    "cols" 80
-    "rows" 24
-    "hp" 100
-    "max_hp" 100
-    "mp" 50
-    "max_mp" 50
-    "level" 1
-    "gold" 50
-    "inventory" (list
-                  (hash "id" "sword" "name" "铁剑" "icon" "⚔️" "count" 1)
-                  (hash "id" "potion" "name" "生命药水" "icon" "🧪" "count" 3))
-    "dialog" #f
-    "logs" (list
-             (hash "channel" "system" "text" "欢迎进入 TextCraft 3.0! (Scheme 驱动引擎)"))
-    "last_action_tick" 0))
+(define (string-index-of str ch)
+  (let ((len (string-length str)))
+    (let loop ((i 0))
+      (if (>= i len)
+          #f
+          (if (char=? (string-ref str i) ch)
+              i
+              (loop (+ i 1)))))))
+
+(define (parse-identity-token raw-token)
+  (let* ((tok-str (if (string? raw-token) raw-token (to-string raw-token)))
+         (colon-idx (string-index-of tok-str #\:)))
+    (if colon-idx
+        (let ((uname (substring tok-str 0 colon-idx))
+              (atok (substring tok-str (+ colon-idx 1) (string-length tok-str))))
+          (hash
+            "has_colon" #t
+            "username" uname
+            "auth_token" atok
+            "identity_key" (if (not (string=? uname "")) uname tok-str)))
+        (hash
+          "has_colon" #f
+          "username" ""
+          "auth_token" tok-str
+          "identity_key" tok-str))))
+
+(define (player-identity-key player-map)
+  (let ((ik (map-get player-map "identity_key" "")))
+    (if (and (string? ik) (not (string=? ik "")))
+        ik
+        (let* ((tok (map-get player-map "token" ""))
+               (parsed (parse-identity-token tok)))
+          (map-get parsed "identity_key" "")))))
+
+(define (evict-duplicate-identity! player-id id-key)
+  (if (and (string? id-key) (not (string=? id-key "")))
+      (let* ((pid-key (to-string player-id))
+             (players (map-get *world-state* "players" (hash)))
+             (cleaned
+               (let ((res players))
+                 (for-each
+                   (lambda (k)
+                     (if (not (string=? k pid-key))
+                         (let ((op (map-get res k #f)))
+                           (if (and op (equal? (player-identity-key op) id-key))
+                               (set! res (hash-remove res k))
+                               #f))
+                         #f))
+                   (hash-keys->list players))
+                 res)))
+        (set! *world-state* (hash-insert *world-state* "players" cleaned)))
+      #f))
+
+(define (make-default-player player-id raw-token)
+  (let* ((parsed (parse-identity-token raw-token))
+         (uname (map-get parsed "username" ""))
+         (id-key (map-get parsed "identity_key" ""))
+         (auth-tok (map-get parsed "auth_token" ""))
+         (tok-str (if (string? raw-token) raw-token (to-string raw-token)))
+         (display-name (if (not (string=? uname ""))
+                           uname
+                           (string-append "Hero_" (to-string player-id)))))
+    (hash
+      "id" player-id
+      "token" tok-str
+      "auth_token" auth-tok
+      "identity_key" id-key
+      "name" display-name
+      "online" #t
+      "theme" "cyberpunk"
+      "double_width" #f
+      "x" 0
+      "y" 0
+      "cols" 80
+      "rows" 24
+      "hp" 100
+      "max_hp" 100
+      "mp" 50
+      "max_mp" 50
+      "level" 1
+      "gold" 50
+      "inventory" (list
+                    (hash "id" "sword" "name" "铁剑" "icon" "⚔️" "count" 1)
+                    (hash "id" "potion" "name" "生命药水" "icon" "🧪" "count" 3))
+      "dialog" #f
+      "logs" (list
+               (hash "channel" "system" "text" "欢迎进入 TextCraft 3.0! (Scheme 驱动引擎)"))
+      "last_action_tick" 0)))
 
 (define (get-player player-id)
   (let* ((pid-key (to-string player-id))
@@ -178,29 +242,16 @@
           (set-player player-id new-p)
           new-p))))
 
+;; Pure O(1) player state update & saved_players synchronization
 (define (set-player player-id player-map)
   (let* ((pid-key (to-string player-id))
          (players (map-get *world-state* "players" (hash)))
-         (tok (map-get player-map "token" ""))
-         (cleaned-players
-           (if (and (string? tok) (not (string=? tok "")))
-               (let ((res players))
-                 (for-each
-                   (lambda (k)
-                     (if (not (string=? k pid-key))
-                         (let ((op (map-get res k #f)))
-                           (if (and op (equal? (map-get op "token" "") tok))
-                               (set! res (hash-remove res k))
-                               #f))
-                         #f))
-                   (hash-keys->list players))
-                 res)
-               players))
-         (new-players (hash-insert cleaned-players pid-key player-map))
-         (ws1 (hash-insert *world-state* "players" new-players)))
-    (if (and (string? tok) (not (string=? tok "")))
+         (new-players (hash-insert players pid-key player-map))
+         (ws1 (hash-insert *world-state* "players" new-players))
+         (id-key (player-identity-key player-map)))
+    (if (and (string? id-key) (not (string=? id-key "")))
         (let* ((saved (map-get ws1 "saved_players" (hash)))
-               (new-saved (hash-insert saved tok player-map)))
+               (new-saved (hash-insert saved id-key player-map)))
           (set! *world-state* (hash-insert ws1 "saved_players" new-saved)))
         (set! *world-state* ws1))
     (bump-visual-version!)))
@@ -210,10 +261,10 @@
          (players (map-get *world-state* "players" (hash)))
          (cur-p (map-get players pid-key #f))
          (ws0 (if cur-p
-                  (let ((tok (map-get cur-p "token" "")))
-                    (if (and (string? tok) (not (string=? tok "")))
+                  (let ((id-key (player-identity-key cur-p)))
+                    (if (and (string? id-key) (not (string=? id-key "")))
                         (let* ((saved (map-get *world-state* "saved_players" (hash)))
-                               (new-saved (hash-insert saved tok cur-p)))
+                               (new-saved (hash-insert saved id-key cur-p)))
                           (hash-insert *world-state* "saved_players" new-saved))
                         *world-state*))
                   *world-state*)))
@@ -221,6 +272,24 @@
       (hash-insert ws0 "players"
         (hash-remove players pid-key)))
     (bump-visual-version!)))
+
+(define (engine:on-player-disconnect pid)
+  (let ((p (get-player pid)))
+    (if p
+        (set-player pid (hash-insert p "online" #f))
+        #f))
+  'ok)
+
+(define (engine:on-player-reconnect pid)
+  (let ((p (get-player pid)))
+    (if p
+        (set-player pid (hash-insert p "online" #t))
+        #f))
+  'ok)
+
+(define (engine:on-player-leave pid)
+  (remove-player pid)
+  'ok)
 
 (define (player:add-log player-id channel text)
   (let* ((p (ensure-player player-id))
@@ -234,22 +303,36 @@
     (set-player player-id p2)))
 
 ;; ----------------------------------------------------------------------------
-;; HUD Builder
+;; Read-Only HUD Builder
 ;; ----------------------------------------------------------------------------
 
 (define (build-player-hud player-id)
-  (let ((p (ensure-player player-id)))
-    (hash
-      "theme" (map-get p "theme" "cyberpunk")
-      "hp" (map-get p "hp" 100)
-      "max_hp" (map-get p "max_hp" 100)
-      "mp" (map-get p "mp" 50)
-      "max_mp" (map-get p "max_mp" 50)
-      "level" (map-get p "level" 1)
-      "gold" (map-get p "gold" 0)
-      "inventory" (map-get p "inventory" '())
-      "dialog" (map-get p "dialog" #f)
-      "logs" (map-get p "logs" '()))))
+  (let ((p (get-player player-id)))
+    (if p
+        (hash
+          "name" (map-get p "name" "Hero")
+          "theme" (map-get p "theme" "cyberpunk")
+          "hp" (map-get p "hp" 100)
+          "max_hp" (map-get p "max_hp" 100)
+          "mp" (map-get p "mp" 50)
+          "max_mp" (map-get p "max_mp" 50)
+          "level" (map-get p "level" 1)
+          "gold" (map-get p "gold" 0)
+          "inventory" (map-get p "inventory" '())
+          "dialog" (map-get p "dialog" #f)
+          "logs" (map-get p "logs" '()))
+        (hash
+          "name" "Hero"
+          "theme" "cyberpunk"
+          "hp" 100
+          "max_hp" 100
+          "mp" 50
+          "max_mp" 50
+          "level" 1
+          "gold" 0
+          "inventory" '()
+          "dialog" #f
+          "logs" '()))))
 
 ;; ----------------------------------------------------------------------------
 ;; Dynamic Viewport ANSI Rasterizer
@@ -316,18 +399,20 @@
          (chunks (map-get *world-state* "chunks" (hash)))
          (players (map-get *world-state* "players" (hash)))
          (cur-pid-key (to-string player-id))
-         ;; Pre-index other players by coordinate for O(1) lookup
+         ;; Pre-index other ONLINE players by coordinate for O(1) lookup
          (other-player-map
            (let ((res (hash)))
              (for-each
                (lambda (k)
                  (if (not (string=? k cur-pid-key))
-                     (let* ((op (hash-ref players k))
-                            (ox (map-get op "x" 0))
-                            (oy (map-get op "y" 0))
-                            (okey (string-append (number->string ox) "," (number->string oy)))
-                            (otile (hash "glyph" "@" "fg" '(100 200 255) "bg" #f "solid" #t "name" (map-get op "name" "player"))))
-                       (set! res (hash-insert res okey otile)))
+                     (let ((op (hash-ref players k)))
+                       (if (map-get op "online" #t)
+                           (let* ((ox (map-get op "x" 0))
+                                  (oy (map-get op "y" 0))
+                                  (okey (string-append (number->string ox) "," (number->string oy)))
+                                  (otile (hash "glyph" "@" "fg" '(100 200 255) "bg" #f "solid" #t "name" (map-get op "name" "player"))))
+                             (set! res (hash-insert res okey otile)))
+                           #f))
                      #f))
                (hash-keys->list players))
              res)))

@@ -221,12 +221,31 @@
 
 (define (engine:on-player-join pid token)
   (let* ((tok-str (if (string? token) token (to-string token)))
+         (parsed (parse-identity-token tok-str))
+         (uname (map-get parsed "username" ""))
+         (auth-tok (map-get parsed "auth_token" ""))
+         (id-key (map-get parsed "identity_key" ""))
+         (_ (evict-duplicate-identity! pid id-key))
          (saved (map-get *world-state* "saved_players" (hash)))
-         (saved-p (if (not (string=? tok-str ""))
-                      (map-get saved tok-str #f)
+         (saved-p (if (not (string=? id-key ""))
+                      (map-get saved id-key #f)
                       #f)))
     (if saved-p
-        (let ((restored-p (hash-insert (hash-insert saved-p "id" pid) "token" tok-str)))
+        (let* ((restored-name (if (not (string=? uname ""))
+                                  uname
+                                  (map-get saved-p "name" (string-append "Hero_" (to-string pid)))))
+               (restored-p
+                 (hash-insert
+                   (hash-insert
+                     (hash-insert
+                       (hash-insert
+                         (hash-insert
+                           (hash-insert saved-p "id" pid)
+                           "token" tok-str)
+                         "auth_token" auth-tok)
+                       "identity_key" id-key)
+                     "name" restored-name)
+                   "online" #t)))
           (set-player pid restored-p)
           (touch-activity!)
           (player:add-log pid "system" "欢迎回来！已恢复你的角色存档进度。")
@@ -281,12 +300,14 @@
                              (let loop-pk ((ks cur-p-keys) (best-p #f) (best-dist 999999))
                                (if (null? ks)
                                    (cons best-p best-dist)
-                                   (let* ((cand-p (hash-ref cur-players (car ks)))
-                                          (cx (map-get cand-p "x" 0))
-                                          (cy (map-get cand-p "y" 0))
-                                          (d (+ (abs (- mx cx)) (abs (- my cy)))))
-                                     (if (< d best-dist)
-                                         (loop-pk (cdr ks) cand-p d)
+                                   (let ((cand-p (hash-ref cur-players (car ks))))
+                                     (if (map-get cand-p "online" #t)
+                                         (let* ((cx (map-get cand-p "x" 0))
+                                                (cy (map-get cand-p "y" 0))
+                                                (d (+ (abs (- mx cx)) (abs (- my cy)))))
+                                           (if (< d best-dist)
+                                               (loop-pk (cdr ks) cand-p d)
+                                               (loop-pk (cdr ks) best-p best-dist)))
                                          (loop-pk (cdr ks) best-p best-dist))))))
                            (target-p (car nearest-info))
                            (dist (cdr nearest-info)))
@@ -317,7 +338,8 @@
                                                      (if (null? ks)
                                                          #f
                                                          (let ((op (hash-ref cur-players (car ks))))
-                                                           (if (and (= (map-get op "x" 0) tx)
+                                                           (if (and (map-get op "online" #t)
+                                                                    (= (map-get op "x" 0) tx)
                                                                     (= (map-get op "y" 0) ty))
                                                                #t
                                                                (any-p (cdr ks)))))))))
@@ -617,14 +639,16 @@
 
       ((and (pair? datum) (equal? (car datum) 'say) (pair? (cdr datum)))
        (let* ((txt (if (string? (cadr datum)) (cadr datum) (to-string (cadr datum))))
-              (pname (map-get p "name" (string-append "Hero#" (to-string pid))))
+              (pname (map-get p "name" (string-append "Hero_" (to-string pid))))
               (msg (string-append pname " 说: " txt))
               (players (map-get *world-state* "players" (hash))))
          (for-each
            (lambda (k)
-             (let* ((op (hash-ref players k))
-                    (op-id (map-get op "id" k)))
-               (player:add-log op-id "chat" msg)))
+             (let ((op (hash-ref players k)))
+               (if (map-get op "online" #t)
+                   (let ((op-id (map-get op "id" k)))
+                     (player:add-log op-id "chat" msg))
+                   #f)))
            (hash-keys->list players))
          (engine:broadcast "chat" msg)))
 

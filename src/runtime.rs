@@ -232,29 +232,26 @@ impl TextCraftServer {
                     grace_period_secs,
                 } => {
                     self.last_snapshots.remove(&player_id);
-                    if let Err(e) = self.logic.on_player_leave(player_id) {
-                        tracing::warn!(player_id, error = %e, "on_player_leave error on disconnect");
+                    if let Err(e) = self.logic.on_player_disconnect(player_id) {
+                        tracing::warn!(player_id, error = %e, "on_player_disconnect error");
                     }
                     tracing::info!(
                         player_id,
                         grace_period_secs,
-                        "Player disconnected, removed from active map and entering grace period"
+                        "Player disconnected, marked offline and entering grace period"
                     );
                 }
                 game_server::SessionEvent::PlayerReconnected { player_id } => {
                     self.last_snapshots.remove(&player_id);
-                    let token = if let Some(session) = self
+                    if let Some(session) = self
                         .handle
                         .session_manager()
                         .get_session_by_player(player_id)
                     {
-                        self.player_tokens.insert(player_id, session.token.clone());
-                        session.token
-                    } else {
-                        self.player_tokens.get(&player_id).cloned().unwrap_or_default()
-                    };
-                    if let Err(e) = self.logic.on_player_join(player_id, &token) {
-                        tracing::warn!(player_id, error = %e, "on_player_join error on reconnect");
+                        self.player_tokens.insert(player_id, session.token);
+                    }
+                    if let Err(e) = self.logic.on_player_reconnect(player_id) {
+                        tracing::warn!(player_id, error = %e, "on_player_reconnect error");
                     }
                     self.handle.send_event(
                         player_id,
@@ -410,8 +407,27 @@ impl TextCraftServer {
         }
     }
 
+    /// Checks whether a player holds admin REPL authorization.
+    /// Supports both legacy exact token matching (`raw_token == admin_token`)
+    /// and multi-user composite tokens (`username:auth_token` where `auth_token == admin_token`).
+    pub fn is_admin_authorized(&self, pid: PlayerId) -> bool {
+        if self.admin_token.is_empty() {
+            return false;
+        }
+        let Some(raw_token) = self.player_tokens.get(&pid) else {
+            return false;
+        };
+        if raw_token == &self.admin_token {
+            return true;
+        }
+        if let Some((_, auth_token)) = raw_token.split_once(':') {
+            return !auth_token.is_empty() && auth_token == self.admin_token;
+        }
+        false
+    }
+
     fn process_admin_eval(&mut self, pid: PlayerId, code: &str) {
-        let is_admin = self.player_tokens.get(&pid) == Some(&self.admin_token);
+        let is_admin = self.is_admin_authorized(pid);
 
         if is_admin {
             match self.logic.eval_repl(code) {

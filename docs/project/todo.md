@@ -317,3 +317,7 @@ flowchart LR
 - [x] 点击右上角“🎨 主题”按钮切换主题后，后续帧不会将其重置回赛博朋克主题。
 - [x] 两个浏览器窗口同服联机时，`(say "hi")` 双方可见，一人开启 `(dw)` 不影响另一人视口，怪物会向距离自己最近的玩家沿 X/Y 轴寻路逼近。
 - [x] 60 FPS 下静止帧 `tick(dt)` 平均耗时 `< 0.2ms`，活动帧平均耗时 `< 2.0ms`。
+- [x] **多人会话四态生命周期与 URL 路由升级 (`#/username/token`)**：
+  - 前端 `web/index.html` 支持 `#/username`、`#/username/token`、`?/username/token`、`?user=...&token=...` 与 `localStorage` 默认持久化，URL 显式传参不污染 `localStorage`，支持 `hashchange` 实时切号重连。
+  - Scheme 层引入显式 `"online"` 状态位与四态钩子（`on-player-join` / `on-player-disconnect` / `on-player-reconnect` / `on-player-leave`），恢复 `set-player` 为纯 $O(1)$ 操作，渲染器 `build-player-hud` 改为纯只读 `get-player`，且视口光栅化、怪物 AI 与聊天广播自动过滤 `"online" = #f` 的断线宽限期玩家。
+  - Rust 宿主层 `is_admin_authorized` 同时兼容旧版完整 Token 与 `username:auth_token` 组合鉴权。

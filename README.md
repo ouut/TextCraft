@@ -186,6 +186,15 @@ cargo run -- \
 
 页面加载后将自动通过 WebSocket 握手进入游戏。
 
+### 4.0 多用户与管理员 URL 路由 (`#/username/token`)
+TextCraft 3.0 前端内置 `resolveClientIdentity()`，支持通过 URL 直接指定用户名与认证 Token，非常适合**单浏览器多标签页联机调试**或快速登录管理员：
+- **默认访问**：`http://127.0.0.1:8081` — 自动读取或生成 `localStorage` 中的持久化角色（`textcraft_user`）。
+- **指定普通玩家（推荐 Hash 路由）**：
+  - `http://127.0.0.1:8081/#/alice` — 以用户名 `alice` 登录（无特权 Token，不覆盖 `localStorage`，可在不同标签页同时打开 `#/alice`、`#/bob` 互不串号，且在地址栏直接修改 Hash 会自动重连切换角色）。
+- **指定管理员玩家**：
+  - `http://127.0.0.1:8081/#/alice/admin` — 以用户名 `alice` 登录并携带管理员 Token `admin`，可在底部命令框使用 `!` 前缀执行在线 Scheme REPL 求值。
+- **其他兼容格式**：同样支持 `http://127.0.0.1:8081/?/alice/admin`、`?user=alice&token=admin` 或旧版 `?token=admin`。
+
 ### 4.1 核心视口与自适应字号
 - 游戏主界面 `<pre id="screen">` 锁死 `white-space: pre; overflow: hidden;`。
 - 前端根据快照中的 `cols`（默认 80）与 `rows`（默认 24）动态计算最佳等宽字体尺寸：
@@ -215,8 +224,10 @@ Scheme 主脚本需实现以下标准生命周期函数：
 | `(engine:viewport-size pid)` | 视口渲染前 | 返回 `(list cols rows)`，动态定义该玩家当前屏幕行列大小 |
 | `(engine:hud-config)` | 握手与主题同步 | 返回 HUD 主题配置（如 `"theme": "cyberpunk"`） |
 | `(engine:on-init)` | 引擎启动时 | 初始化 `*world-state*` 地图分块、实体与初始数据 |
-| `(engine:on-player-join pid token)` | 玩家建立连接 | 为玩家分配角色属性、坐标与初始背包 |
-| `(engine:on-player-leave pid)` | 玩家断开连接 | 保存角色状态或清理场景实例 |
+| `(engine:on-player-join pid token)` | 玩家建立连接 | 解析 `username:token`，清理同身份旧连接，恢复存档或创建角色并置 `"online" #t` |
+| `(engine:on-player-disconnect pid)` | 玩家断线进入宽限期 | 将玩家 `"online"` 标记为 `#f`（保留内存态但从他人视口与 AI 索敌中隐藏，不删档） |
+| `(engine:on-player-reconnect pid)` | 宽限期内恢复连接 | 将玩家 `"online"` 恢复为 `#t` 并立即重推最新快照（不重复刷欢迎日志） |
+| `(engine:on-player-leave pid)` | 宽限期超时彻底离开 | 归档角色数据至 `"saved_players"` 并从活跃表 `"players"` 物理移除 |
 | `(engine:on-tick dt tick-id)` | 主时钟心跳 | 更新世界演化、怪物巡逻与战斗 AI、状态结算与无操作降频 |
 | `(engine:on-input pid input-map)` | 接收按键/鼠标 | 处理角色位移与交互动作 |
 | `(engine:on-ui-action pid action-map)`| 接收 HUD 交互 | 处理点击背包、对话关闭、视口变更等 UI 交互 |
