@@ -232,20 +232,29 @@ impl TextCraftServer {
                     grace_period_secs,
                 } => {
                     self.last_snapshots.remove(&player_id);
+                    if let Err(e) = self.logic.on_player_leave(player_id) {
+                        tracing::warn!(player_id, error = %e, "on_player_leave error on disconnect");
+                    }
                     tracing::info!(
                         player_id,
                         grace_period_secs,
-                        "Player disconnected, entering grace period"
+                        "Player disconnected, removed from active map and entering grace period"
                     );
                 }
                 game_server::SessionEvent::PlayerReconnected { player_id } => {
                     self.last_snapshots.remove(&player_id);
-                    if let Some(session) = self
+                    let token = if let Some(session) = self
                         .handle
                         .session_manager()
                         .get_session_by_player(player_id)
                     {
-                        self.player_tokens.insert(player_id, session.token);
+                        self.player_tokens.insert(player_id, session.token.clone());
+                        session.token
+                    } else {
+                        self.player_tokens.get(&player_id).cloned().unwrap_or_default()
+                    };
+                    if let Err(e) = self.logic.on_player_join(player_id, &token) {
+                        tracing::warn!(player_id, error = %e, "on_player_join error on reconnect");
                     }
                     self.handle.send_event(
                         player_id,

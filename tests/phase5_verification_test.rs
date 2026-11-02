@@ -143,14 +143,15 @@ async fn test_task_5_1_admin_disconnect_grace_period_and_reconnect() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     server.tick(0.016).unwrap();
 
-    // Verify character is NOT deleted from active `players` during grace period!
+    // Verify disconnected character is removed from active `players` (no ghost on map)
+    // and safely persisted in `saved_players` by token during the grace period!
     let state_during_grace = server.logic.export_state().unwrap();
     assert!(
-        state_during_grace["players"].get(&pid_str).is_some(),
-        "Player must remain in active 'players' map during grace period"
+        state_during_grace["players"].get(&pid_str).is_none(),
+        "Disconnected player must be removed from active 'players' map so no ghost character lingers"
     );
-    assert_eq!(state_during_grace["players"][&pid_str]["x"], 1);
-    assert_eq!(state_during_grace["players"][&pid_str]["gold"], 777);
+    assert_eq!(state_during_grace["saved_players"][&admin_secret]["x"], 1);
+    assert_eq!(state_during_grace["saved_players"][&admin_secret]["gold"], 777);
 
     // 4. Reconnect with the same Admin token within grace period
     let (mut ws2, _) = connect_async(&ws_url).await.unwrap();

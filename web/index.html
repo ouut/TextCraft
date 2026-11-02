@@ -289,11 +289,31 @@
       const connTextEl = document.getElementById('conn-text');
       const fpsValEl = document.getElementById('fps-val');
 
+      function resolveClientToken() {
+        const urlToken = new URLSearchParams(window.location.search).get('token');
+        if (urlToken) return urlToken;
+        try {
+          let saved = sessionStorage.getItem('textcraft_token');
+          if (!saved) {
+            saved = 'player_' + Math.random().toString(36).substring(2, 10);
+            sessionStorage.setItem('textcraft_token', saved);
+          }
+          return saved;
+        } catch (_) {
+          return 'player_' + Math.random().toString(36).substring(2, 10);
+        }
+      }
+      const clientToken = resolveClientToken();
+
       function connectWebSocket() {
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+          ws.onclose = null;
+          ws.close();
+        }
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host || 'localhost:8081';
-        const token = new URLSearchParams(window.location.search).get('token') || ('player_' + Math.random().toString(36).substring(2, 8));
+        const token = clientToken;
         connTextEl.textContent = '连接中...';
 
         try {
@@ -539,6 +559,11 @@
           e.preventDefault();
         }
         TextCraft.sendKey(e.code, { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
+      });
+
+      window.addEventListener('beforeunload', () => {
+        if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+        if (ws) { ws.onclose = null; ws.close(); ws = null; }
       });
 
       updateScreenFontSize(80, 24);
