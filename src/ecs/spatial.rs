@@ -36,6 +36,18 @@ impl SpatialGrid {
         }
     }
 
+    /// Check whether the spatial grid contains no entity cells.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    /// Return the count of occupied grid coordinates.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.cells.len()
+    }
+
     /// Insert or update an entity at `(x, y)` on the given `layer` with optional `glyph`.
     /// The bucket maintains ascending layer order (layer 0: Terrain, 1: Item, 2: Creature, 3: Overlay).
     pub fn insert(&mut self, eid: u64, x: i32, y: i32, layer: u8, glyph: Option<VisualGlyph>) {

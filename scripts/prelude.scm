@@ -504,3 +504,142 @@
     (if handler
         (handler safe-args)
         (hash "error" (string-append "Unknown MCP tool: " tname)))))
+
+
+;; ============================================================================
+;; Flecs ECS DSL & Idiomatic Scheme Wrappers (TextCraft 4.0)
+;; ============================================================================
+
+;; Standard ECS Layer Constants
+(define LAYER-TERRAIN 0)
+(define LAYER-ITEM-LIQUID 1)
+(define LAYER-CREATURE 2)
+(define LAYER-OVERLAY 3)
+
+;; ----------------------------------------------------------------------------
+;; define-entity & spawn-entity macros
+;; ----------------------------------------------------------------------------
+
+(define-syntax define-entity
+  (syntax-rules (pos glyph props)
+    [(_ name (pos x y layer) (glyph ch fg bg solid opaque) (props (k v) ...))
+     (define name
+       (let ((eid (ecs:spawn (if (symbol? 'name) (symbol->string 'name) (to-string 'name)))))
+         (ecs:set-pos eid x y layer)
+         (ecs:set-glyph eid ch fg bg solid opaque)
+         (ecs:set eid (if (symbol? 'k) (symbol->string 'k) k) v) ...
+         eid))]
+    [(_ name (pos x y layer) (glyph ch fg bg) (props (k v) ...))
+     (define name
+       (let ((eid (ecs:spawn (if (symbol? 'name) (symbol->string 'name) (to-string 'name)))))
+         (ecs:set-pos eid x y layer)
+         (ecs:set-glyph eid ch fg bg #f #f)
+         (ecs:set eid (if (symbol? 'k) (symbol->string 'k) k) v) ...
+         eid))]
+    [(_ name (pos x y layer) (glyph ch fg bg solid opaque))
+     (define name
+       (let ((eid (ecs:spawn (if (symbol? 'name) (symbol->string 'name) (to-string 'name)))))
+         (ecs:set-pos eid x y layer)
+         (ecs:set-glyph eid ch fg bg solid opaque)
+         eid))]
+    [(_ name (pos x y layer) (glyph ch fg bg))
+     (define name
+       (let ((eid (ecs:spawn (if (symbol? 'name) (symbol->string 'name) (to-string 'name)))))
+         (ecs:set-pos eid x y layer)
+         (ecs:set-glyph eid ch fg bg #f #f)
+         eid))]
+    [(_ name (pos x y layer))
+     (define name
+       (let ((eid (ecs:spawn (if (symbol? 'name) (symbol->string 'name) (to-string 'name)))))
+         (ecs:set-pos eid x y layer)
+         eid))]))
+
+(define-syntax spawn-entity
+  (syntax-rules (pos glyph props)
+    [(_ (pos x y layer) (glyph ch fg bg solid opaque) (props (k v) ...))
+     (let ((eid (ecs:spawn)))
+       (ecs:set-pos eid x y layer)
+       (ecs:set-glyph eid ch fg bg solid opaque)
+       (ecs:set eid (if (symbol? 'k) (symbol->string 'k) k) v) ...
+       eid)]
+    [(_ (pos x y layer) (glyph ch fg bg) (props (k v) ...))
+     (let ((eid (ecs:spawn)))
+       (ecs:set-pos eid x y layer)
+       (ecs:set-glyph eid ch fg bg #f #f)
+       (ecs:set eid (if (symbol? 'k) (symbol->string 'k) k) v) ...
+       eid)]
+    [(_ (pos x y layer) (glyph ch fg bg solid opaque))
+     (let ((eid (ecs:spawn)))
+       (ecs:set-pos eid x y layer)
+       (ecs:set-glyph eid ch fg bg solid opaque)
+       eid)]
+    [(_ (pos x y layer) (glyph ch fg bg))
+     (let ((eid (ecs:spawn)))
+       (ecs:set-pos eid x y layer)
+       (ecs:set-glyph eid ch fg bg #f #f)
+       eid)]
+    [(_ (pos x y layer))
+     (let ((eid (ecs:spawn)))
+       (ecs:set-pos eid x y layer)
+       eid)]))
+
+;; ----------------------------------------------------------------------------
+;; Tag helpers
+;; ----------------------------------------------------------------------------
+
+(define-syntax with-tag
+  (syntax-rules ()
+    [(_ eid tag body ...)
+     (let* ((_eid eid)
+            (_tag tag)
+            (_had? (ecs:has-tag? _eid _tag)))
+       (unless _had?
+         (ecs:add-tag _eid _tag))
+       (let ((res (begin body ...)))
+         (unless _had?
+           (ecs:remove-tag _eid _tag))
+         res))]))
+
+(define (tag! eid tag)
+  (ecs:add-tag eid tag))
+
+(define (untag! eid tag)
+  (ecs:remove-tag eid tag))
+
+(define (tagged? eid tag)
+  (ecs:has-tag? eid tag))
+
+;; ----------------------------------------------------------------------------
+;; Relation helpers
+;; ----------------------------------------------------------------------------
+
+(define (relate! a rel b)
+  (ecs:relate a rel b))
+
+(define (unrelate! a rel b)
+  (ecs:unrelate a rel b))
+
+(define (equipped-on a b)
+  (ecs:relate a "EquippedOn" b))
+
+(define (equipped-on? a b)
+  (equal? (ecs:target a "EquippedOn") b))
+
+(define (equipped-items b)
+  (ecs:children b "EquippedOn"))
+
+(define (part-of a b)
+  (ecs:relate a "PartOf" b))
+
+(define (part-of? a b)
+  (equal? (ecs:target a "PartOf") b))
+
+(define (parts-of b)
+  (ecs:children b "PartOf"))
+
+(define (covered-with a b)
+  (ecs:relate a "CoveredWith" b))
+
+(define (covered-with? a b)
+  (equal? (ecs:target a "CoveredWith") b))
+
