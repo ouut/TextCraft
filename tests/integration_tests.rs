@@ -79,6 +79,7 @@ fn test_1_cli_argument_parsing_and_config() {
     assert_eq!(default_args.log_level, LogLevel::Info);
     assert_eq!(default_args.admin_token, "admin");
     assert_eq!(default_args.autosave_sec, 30);
+    assert_eq!(default_args.heartbeat_timeout_secs, 30);
     assert!(default_args.save_file.is_none());
     assert_eq!(default_args.snapshot_heartbeat_ms, 1000);
 

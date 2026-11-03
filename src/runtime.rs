@@ -118,6 +118,10 @@ pub struct ServerArgs {
     #[arg(long, default_value_t = 30)]
     pub autosave_sec: u64,
 
+    /// Heartbeat timeout in seconds before an active session enters the grace period
+    #[arg(long, default_value_t = 30)]
+    pub heartbeat_timeout_secs: u64,
+
     /// Snapshot heartbeat interval in milliseconds (guarantees periodic snapshot even if unchanged; 0 disables deduplication)
     #[arg(long, default_value_t = 1000)]
     pub snapshot_heartbeat_ms: u64,
@@ -247,7 +251,9 @@ impl TextCraftServer {
     /// Starts the server instance with parsed CLI arguments.
     pub async fn start(args: ServerArgs) -> Result<Self, Box<dyn std::error::Error>> {
         let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
-        let config = ServerConfig::new(addr).with_embedded_assets(&EMBEDDED_WEB_ASSETS);
+        let config = ServerConfig::new(addr)
+            .with_heartbeat_timeout_secs(args.heartbeat_timeout_secs)
+            .with_embedded_assets(&EMBEDDED_WEB_ASSETS);
         let mut logic = SchemeLogic::new(args.scripts_dir, args.watch, args.save_file)?;
         logic.init()?;
 
