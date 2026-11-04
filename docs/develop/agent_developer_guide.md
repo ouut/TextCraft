@@ -5,7 +5,9 @@
 > TextCraft 3.0 采用 **“纯 Scheme 游戏核心 + 零业务耦合 Rust 宿主 + 极简 Web 终端底座 + 单进程 MCP AI 管道”** 架构：
 > - **开发游戏玩法与世界逻辑**：只需修改 `scripts/prelude.scm` 与 `scripts/main.scm`，**无需阅读或修改任何 Rust 代码**；
 > - **定制前端 HUD 界面与交互**：只需在 `web/index.html` 中调用全局桥接对象 `window.TextCraft`，自由编写原生 HTML/CSS/JS，通过纯 JSON 字典与 Scheme 通信；
-> - **使用 MCP 工具与 AI 实时协同开发**：通过 `--mcp-port 8082` 开启 HTTP JSON-RPC 2.0 MCP 接口，并可在 `.scm` 中调用 `(mcp:def-tool ...)` 动态自举扩展新工具，详见 [**《MCP 开发者与 AI 协同开发指南》 (`docs/develop/mcp_developer_guide.md`)**](mcp_developer_guide.md)。
+> - **使用 MCP 工具与 AI 实时协同开发**：通过 `--mcp-port 8082` 开启 HTTP JSON-RPC 2.0 MCP 接口，并可在 `.scm` 中调用 `(mcp:def-tool ...)` 动态自举扩展新工具，详见 [**《MCP 开发者与 AI 协同开发指南》 (`docs/develop/mcp_developer_guide.md`)**](mcp_developer_guide.md)；
+> - **查询 Steel 内置函数与标准库**：TextCraft 使用嵌入式 Steel Scheme 0.8.3 引擎，支持数百个原生数学、字符串、列表、哈希表、集合、文件与网络操作，详见 [**《Steel Scheme 0.8.3 内置标准库与核心函数参考手册》 (`docs/develop/steel_scheme_reference.md`)**](steel_scheme_reference.md)；
+> - **心法跃迁与编码实践**：想要消除括号心智负担、写出高内聚数据流代码，请参阅 [**《Steel Scheme 代码开发最佳实践：从入门到“快到起飞”》 (`docs/develop/steel_scheme_best_practices.md`)**](steel_scheme_best_practices.md)。
 
 ---
 
