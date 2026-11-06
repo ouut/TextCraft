@@ -50,7 +50,6 @@ pub struct SchemeLogic {
     watcher: Option<ScriptWatcher>,
     save_file: Option<PathBuf>,
     outbound_queue: Arc<Mutex<Vec<OutboundMessage>>>,
-    extra_version: u64,
 }
 
 impl SchemeLogic {
@@ -136,7 +135,6 @@ impl SchemeLogic {
             watcher,
             save_file,
             outbound_queue,
-            extra_version: 0,
         })
     }
 
@@ -313,12 +311,18 @@ impl SchemeLogic {
     }
 
     /// Render composite snapshot for an online player `(engine:render-snapshot pid)`.
-    pub fn render_snapshot(&mut self, pid: u64) -> Result<PlayerSnapshot, String> {
+    /// Returns `Ok(None)` if viewport and HUD are unchanged (not dirty).
+    /// Returns `Ok(Some(snapshot))` if rendered or changed.
+    pub fn render_snapshot(&mut self, pid: u64) -> Result<Option<PlayerSnapshot>, String> {
         let args = vec![SteelVal::IntV(pid as isize)];
         let val = self
             .app
             .safe_call_function("engine:render-snapshot", args, 500)
             .map_err(|e| format!("engine:render-snapshot error: {}", e))?;
+
+        if let SteelVal::BoolV(false) = val {
+            return Ok(None);
+        }
 
         if let SteelVal::HashMapV(ref hm) = val {
             let k_cols = SteelVal::StringV("cols".into());
@@ -339,12 +343,12 @@ impl SchemeLogic {
             ) {
                 let hud = steel_val_to_json(hud_val)
                     .map_err(|e| format!("steel_val_to_json error: {}", e))?;
-                return Ok(PlayerSnapshot {
+                return Ok(Some(PlayerSnapshot {
                     cols: *cols as u16,
                     rows: *rows as u16,
                     screen: screen.to_string(),
                     hud,
-                });
+                }));
             }
         }
 
@@ -352,21 +356,11 @@ impl SchemeLogic {
             .map_err(|e| format!("steel_val_to_json error: {}", e))?;
         let snapshot: PlayerSnapshot = serde_json::from_value(json)
             .map_err(|e| format!("Failed to parse PlayerSnapshot: {}", e))?;
-        Ok(snapshot)
-    }
-
-    /// Query current visual version counter to short-circuit unchanged snapshot rendering.
-    pub fn visual_version(&self) -> u64 {
-        let base = match self.app.extract_value("*visual-version*") {
-            Ok(SteelVal::IntV(v)) => v as u64,
-            _ => 0,
-        };
-        base.wrapping_add(self.extra_version)
+        Ok(Some(snapshot))
     }
 
     /// Evaluate expression in REPL style with watchdog timeout.
     pub fn eval_repl(&mut self, code: &str) -> Result<String, String> {
-        self.extra_version = self.extra_version.wrapping_add(1);
         self.app
             .safe_eval(code, 1000)
             .map_err(|e| format!("REPL error: {}", e))
@@ -383,7 +377,6 @@ impl SchemeLogic {
 
     /// Import world state from JSON value via `(engine:import-state data)`.
     pub fn import_state(&mut self, data: &Value) -> Result<(), String> {
-        self.extra_version = self.extra_version.wrapping_add(1);
         let val = json_to_steel_val(data);
         self.app
             .safe_call_function("engine:import-state", vec![val], 1000)
@@ -493,7 +486,6 @@ impl SchemeLogic {
         if let Some(ref mut watcher) = self.watcher {
             let _ = watcher.check_modified();
         }
-        self.extra_version = self.extra_version.wrapping_add(1);
 
         tracing::info!("Scripts reloaded successfully with state preserved");
         Ok(())
@@ -531,7 +523,6 @@ impl SchemeLogic {
 
     /// Invoke a Scheme MCP tool handler via `(engine:on-mcp-call name args)`.
     pub fn mcp_call_tool(&mut self, name: &str, args: &Value) -> Result<Value, String> {
-        self.extra_version = self.extra_version.wrapping_add(1);
         let args_val = json_to_steel_val(args);
         let call_args = vec![SteelVal::StringV(name.to_string().into()), args_val];
         let val = self

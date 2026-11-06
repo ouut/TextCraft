@@ -671,16 +671,29 @@
   'ok)
 
 (define (engine:render-snapshot pid)
-  (let* ((vp (engine:viewport-size pid))
-         (cols (car vp))
-         (rows (cadr vp))
-         (screen (render-viewport-ansi pid cols rows))
-         (hud (build-player-hud pid)))
-    (hash
-      "screen" screen
-      "cols" cols
-      "rows" rows
-      "hud" hud)))
+  (let ((p (get-player pid)))
+    (if (and p
+             (not (map-get p "dirty" #t))
+             (= (map-get p "last_rendered_ver" 0) *world-dirty-version*))
+        #f
+        (begin
+          (if p
+              (let* ((pid-key (to-string pid))
+                     (players (map-get *world-state* "players" (hash)))
+                     (p-clean (hash-insert (hash-insert p "dirty" #f) "last_rendered_ver" *world-dirty-version*))
+                     (new-players (hash-insert players pid-key p-clean)))
+                (set! *world-state* (hash-insert *world-state* "players" new-players)))
+              #f)
+          (let* ((vp (engine:viewport-size pid))
+                 (cols (car vp))
+                 (rows (cadr vp))
+                 (screen (render-viewport-ansi pid cols rows))
+                 (hud (build-player-hud pid)))
+            (hash
+              "screen" screen
+              "cols" cols
+              "rows" rows
+              "hud" hud))))))
 
 (define (engine:export-state)
   *world-state*)

@@ -44,11 +44,15 @@ mod tests {
         logic.on_player_join(1, "test_token").expect("Player join failed");
 
         // 3. Render Snapshot
-        let snap = logic.render_snapshot(1).expect("Render snapshot failed");
+        let snap = logic.render_snapshot(1).expect("Render snapshot failed").expect("Expected snapshot on first render");
         assert_eq!(snap.cols, 80);
         assert_eq!(snap.rows, 24);
         assert!(!snap.screen.is_empty());
         assert_eq!(snap.hud["theme"], "cyberpunk");
+
+        // 3.1 Unchanged Snapshot should return Ok(None)
+        let snap_unchanged = logic.render_snapshot(1).expect("Render snapshot failed");
+        assert!(snap_unchanged.is_none(), "Expected Ok(None) for unchanged viewport");
 
         // 4. Tick
         logic.on_tick(0.016, 1).expect("Tick failed");
