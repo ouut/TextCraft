@@ -31,6 +31,96 @@ fn steel_to_string(v: &SteelVal) -> String {
     }
 }
 
+pub fn compute_json_diff(old_val: &Value, new_val: &Value) -> Value {
+    let mut added = serde_json::Map::new();
+    let mut removed = serde_json::Map::new();
+    let mut changed = serde_json::Map::new();
+
+    fn diff_recursive(
+        prefix: &str,
+        old: &Value,
+        new: &Value,
+        added: &mut serde_json::Map<String, Value>,
+        removed: &mut serde_json::Map<String, Value>,
+        changed: &mut serde_json::Map<String, Value>,
+    ) {
+        if old == new {
+            return;
+        }
+
+        match (old, new) {
+            (Value::Object(old_map), Value::Object(new_map)) => {
+                for (k, v_old) in old_map {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{}.{}", prefix, k)
+                    };
+                    if let Some(v_new) = new_map.get(k) {
+                        diff_recursive(&path, v_old, v_new, added, removed, changed);
+                    } else {
+                        removed.insert(path, v_old.clone());
+                    }
+                }
+                for (k, v_new) in new_map {
+                    if !old_map.contains_key(k) {
+                        let path = if prefix.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{}.{}", prefix, k)
+                        };
+                        added.insert(path, v_new.clone());
+                    }
+                }
+            }
+            (Value::Array(old_arr), Value::Array(new_arr)) => {
+                let max_len = old_arr.len().max(new_arr.len());
+                for idx in 0..max_len {
+                    let path = if prefix.is_empty() {
+                        idx.to_string()
+                    } else {
+                        format!("{}.{}", prefix, idx)
+                    };
+                    match (old_arr.get(idx), new_arr.get(idx)) {
+                        (Some(o), Some(n)) => {
+                            diff_recursive(&path, o, n, added, removed, changed);
+                        }
+                        (Some(o), None) => {
+                            removed.insert(path, o.clone());
+                        }
+                        (None, Some(n)) => {
+                            added.insert(path, n.clone());
+                        }
+                        (None, None) => {}
+                    }
+                }
+            }
+            _ => {
+                let key = if prefix.is_empty() {
+                    "root".to_string()
+                } else {
+                    prefix.to_string()
+                };
+                changed.insert(
+                    key,
+                    serde_json::json!({
+                        "old": old,
+                        "new": new
+                    }),
+                );
+            }
+        }
+    }
+
+    diff_recursive("", old_val, new_val, &mut added, &mut removed, &mut changed);
+
+    serde_json::json!({
+        "added": added,
+        "removed": removed,
+        "changed": changed
+    })
+}
+
 fn sort_script_files(files: &mut [PathBuf]) {
     files.sort_by(|a, b| {
         let is_prelude_a = a.file_name().is_some_and(|f| f == "prelude.scm");
@@ -527,6 +617,47 @@ impl SchemeLogic {
             .safe_call_function("engine:mcp-tools", vec![], 500)
             .map_err(|e| format!("engine:mcp-tools error: {}", e))?;
         steel_val_to_json(&val).map_err(|e| format!("mcp_list_tools json error: {}", e))
+    }
+
+    /// Evaluates a Scheme assertion expression with a watchdog timeout.
+    ///
+    /// If the expression evaluates to non-`#f` (or truthy), returns `Ok(value_json)`.
+    /// If the expression evaluates to `#f`, returns `Err("Assertion returned false (#f)".to_string())`.
+    /// If an exception or timeout occurs, returns `Err(error_details)`.
+    pub fn eval_assertion(&mut self, code: &str, timeout_ms: u64) -> Result<Value, String> {
+        self.extra_version = self.extra_version.wrapping_add(1);
+        let wrapped_code = format!(
+            r#"(let ((__res (begin {})))
+                 (if (equal? __res #f)
+                     "__ASSERTION_FAILED_FALSE__"
+                     __res))"#,
+            code
+        );
+        match self.app.safe_eval(&wrapped_code, timeout_ms.max(1)) {
+            Ok(output_str) => {
+                let trimmed = output_str.trim();
+                let res_str = trimmed.strip_prefix("=> ").unwrap_or(trimmed);
+                if res_str == "\"__ASSERTION_FAILED_FALSE__\"" {
+                    Err("Assertion failed: expression evaluated to #f".to_string())
+                } else if res_str == "#t" || res_str == "#true" {
+                    Ok(Value::Bool(true))
+                } else if let Ok(i) = res_str.parse::<i64>() {
+                    Ok(Value::Number(i.into()))
+                } else if let Ok(f) = res_str.parse::<f64>() {
+                    if let Some(n) = serde_json::Number::from_f64(f) {
+                        Ok(Value::Number(n))
+                    } else {
+                        Ok(Value::String(res_str.to_string()))
+                    }
+                } else if res_str.starts_with('"') && res_str.ends_with('"') && res_str.len() >= 2 {
+                    let unescaped = &res_str[1..res_str.len() - 1];
+                    Ok(Value::String(unescaped.to_string()))
+                } else {
+                    Ok(Value::String(res_str.to_string()))
+                }
+            }
+            Err(e) => Err(format!("Assertion error: {}", e)),
+        }
     }
 
     /// Invoke a Scheme MCP tool handler via `(engine:on-mcp-call name args)`.

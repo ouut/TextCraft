@@ -94,7 +94,7 @@ curl -s -X POST http://127.0.0.1:8082/mcp \
 
 ## 三、 宿主核心桥接工具：直接复用游戏命令与输入管线
 
-Rust 宿主层内置了 **3 个永不失效的核心桥接工具**（即使 `.scm` 脚本被改坏，AI 依然可以通过它们修复并重载脚本）：
+Rust 宿主层内置了 **8 个永不失效的核心桥接与虚拟模拟工具**（即使 `.scm` 脚本被改坏，AI 依然可以通过它们修复并重载脚本，或执行单步无头调试）：
 
 ### 1. `game_command` —— 复用游戏底部命令输入框与 `!` 管理员 REPL
 直接复用游戏内命令输入管线，支持两种模式：
@@ -149,6 +149,47 @@ Rust 宿主层内置了 **3 个永不失效的核心桥接工具**（即使 `.sc
 无视 `--watch` 开关或 2 秒轮询间隔，立即扫描并重编译 `scripts/` 下的 `.scm` 文件（自动导出并恢复 `*world-state*`）：
 - 编译成功返回 `"Reloaded successfully"`（`isError: false`）；
 - 若新脚本存在括号不匹配等语法错误，自动回滚世界状态并返回详细编译错误栈（`isError: true`），方便 AI 改完 `.scm` 文件后立即自检修复。
+
+### 4. `pause_clock` 与 `resume_clock` —— 虚拟模拟时钟暂停与恢复
+- `pause_clock`: 将主物理时钟暂停。世界 `tick(dt)` 推进立即停止，但 WebSocket 网络消息收发、心跳与 MCP 请求正常保活，方便 AI 介入冻结现场并执行精确诊断。
+- `resume_clock`: 恢复物理时钟定时驱动。
+
+### 5. `step_simulation` —— 虚拟时钟多步推演与操作序列注入
+支持以任意步长 `dt` 单步或连续推演指定步数 `steps`，并在特定步数安全注入操作序列：
+```json
+{
+  "name": "step_simulation",
+  "arguments": {
+    "steps": 1,
+    "dt": 0.016,
+    "inputs": [
+      {
+        "step": 0,
+        "player_id": 1,
+        "type": "key",
+        "code": "KeyD"
+      }
+    ],
+    "include_snapshot": true,
+    "snapshot_player_id": 1,
+    "include_state_diff": true
+  }
+}
+```
+返回包含 `steps_executed`、`final_tick`、`duration_ms`，以及可选的 ANSI 视口快照和状态微秒级 Diff。
+
+### 6. `get_state_diff` —— 轻量级微秒级状态差分比较
+对比前后两个 JSON 状态树或当前内存世界状态，以扁平化路径输出：
+- `changed`: 如 `"players.1.x": { "old": 5, "new": 6 }`
+- `added`: 如 `"players.2": { ... }`
+- `removed`: 如 `"score": 0`
+避免大模型处理全量巨型状态，极度节省 Context Token。
+
+### 7. `eval_assertion` —— 游戏断言执行器 (TDD 单元测试)
+在带有看门狗保护的 Scheme 沙箱中求值断言表达式：
+- 若表达式求值为非 `#f`，返回 `{"passed": true, "result": ...}`；
+- 若表达式求值为 `#f` 或发生 Scheme 异常，返回 `{"passed": false, "error": "..."}`。
+使 Agent 具备开箱即用的测试驱动开发（TDD）闭环能力。
 
 ---
 
