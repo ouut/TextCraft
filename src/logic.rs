@@ -623,11 +623,16 @@ impl SchemeLogic {
         Ok(true)
     }
 
-    /// Force immediate reload of all root `.scm` scripts in `scripts_dir` while preserving `*world-state*`.
-    /// Ignores `watch_scripts` setting and file modification timestamps.
-    pub fn force_reload(&mut self) -> Result<(), String> {
+    /// Force immediate reload of all root `.scm` scripts in `scripts_dir`.
+    ///
+    /// If `clean` is true, previous world state is discarded and `(engine:on-init)`
+    /// is invoked to initialize a fresh world.
+    /// If `clean` is false, previous world state is preserved and restored.
+    /// In either case, if compilation fails, the previous world state is safely restored.
+    pub fn force_reload(&mut self, clean: bool) -> Result<(), String> {
         tracing::info!(
             scripts_dir = %self.scripts_dir.display(),
+            clean,
             "Forcing immediate reload of Scheme scripts..."
         );
         let state = self.export_state().ok();
@@ -666,15 +671,31 @@ impl SchemeLogic {
             }
         }
 
-        if let Some(st) = state {
+        if clean {
+            if let Err(e) = self.app.call_function("engine:on-init", vec![]) {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to run engine:on-init during clean reload, restoring state"
+                );
+                if let Some(st) = state {
+                    let _ = self.import_state(&st);
+                }
+                return Err(format!("Failed to run engine:on-init during clean reload: {}", e));
+            }
+        } else if let Some(st) = state {
             let _ = self.import_state(&st);
         }
+
         if let Some(ref mut watcher) = self.watcher {
             let _ = watcher.check_modified();
         }
         self.extra_version = self.extra_version.wrapping_add(1);
 
-        tracing::info!("Scripts reloaded successfully with state preserved");
+        if clean {
+            tracing::info!("Scripts reloaded successfully with clean initial state");
+        } else {
+            tracing::info!("Scripts reloaded successfully with state preserved");
+        }
         Ok(())
     }
 
@@ -692,7 +713,7 @@ impl SchemeLogic {
 
         if is_modified {
             tracing::info!("Script changes detected, reloading scripts...");
-            self.force_reload()
+            self.force_reload(false)
                 .map_err(|e| Box::new(std::io::Error::other(e)))?;
             return Ok(true);
         }

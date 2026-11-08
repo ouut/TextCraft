@@ -914,10 +914,15 @@ impl TextCraftServer {
             }),
             serde_json::json!({
                 "name": "reload_scripts",
-                "description": "Force immediate hot-reload of all Scheme (.scm) scripts in scripts/ while preserving *world-state*, returning 'Reloaded successfully' or detailed compilation errors.",
+                "description": "Force immediate hot-reload of all Scheme (.scm) scripts in scripts/. If clean is true (default), re-initializes world state via (engine:on-init); if false, preserves existing *world-state*.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "clean": {
+                            "type": "boolean",
+                            "description": "Whether to perform a clean reload by re-calling (engine:on-init) instead of restoring previous world state. Defaults to true."
+                        }
+                    }
                 }
             }),
             serde_json::json!({
@@ -1350,10 +1355,16 @@ impl TextCraftServer {
                     Err(err) => (err, true),
                 }
             }
-            "reload_scripts" => match self.logic.force_reload() {
-                Ok(()) => ("Reloaded successfully".to_string(), false),
-                Err(err) => (err, true),
-            },
+            "reload_scripts" => {
+                let clean = arguments
+                    .get("clean")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                match self.logic.force_reload(clean) {
+                    Ok(()) => ("Reloaded successfully".to_string(), false),
+                    Err(err) => (err, true),
+                }
+            }
             "pause_clock" => {
                 self.is_paused.store(true, Ordering::Relaxed);
                 let out = serde_json::json!({

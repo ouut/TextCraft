@@ -710,3 +710,175 @@ async fn test_scheme_direct_mcp_store_functions() {
 
     server.handle.shutdown();
 }
+
+#[tokio::test]
+async fn test_reload_scripts_clean_and_lossless() {
+    let scripts_dir = get_scripts_dir();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let config = ServerConfig::new(addr).with_embedded_assets(&EMBEDDED_WEB_ASSETS);
+    let mut logic = SchemeLogic::new(&scripts_dir, false, None).unwrap();
+    logic.init().unwrap();
+
+    let mut server = TextCraftServer::start_with_config(config, logic, "admin".to_string(), 1.0, 0)
+        .await
+        .unwrap();
+
+    let mcp_addr = server
+        .start_mcp_server("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+
+    // 1. Establish player 1 and verify initial coordinates and gold
+    server.logic.on_player_join(1, "token_1").unwrap();
+    let init_state = server.logic.export_state().unwrap();
+    let init_x = init_state["players"]["1"]["x"].as_i64().unwrap_or(0);
+    let init_y = init_state["players"]["1"]["y"].as_i64().unwrap_or(0);
+    assert_eq!(init_x, 0);
+    assert_eq!(init_y, 0);
+
+    // 2. Modify world state: move player with KeyD and add gold
+    for _ in 0..5 {
+        let _ = server.logic.on_input(
+            1,
+            &textcraft::PlayerInput::Key {
+                code: "KeyD".to_string(),
+                shift: false,
+                ctrl: false,
+                alt: false,
+            },
+        );
+        let t = server.handle.increment_server_tick();
+        server.logic.on_tick(0.016, t).unwrap();
+    }
+    server
+        .logic
+        .eval_repl("(set-player 1 (hash-insert (ensure-player 1) \"gold\" 9999))")
+        .unwrap();
+
+    let mod_state = server.logic.export_state().unwrap();
+    let mod_x = mod_state["players"]["1"]["x"].as_i64().unwrap();
+    let mod_gold = mod_state["players"]["1"]["gold"].as_i64().unwrap();
+    assert!(mod_x > 0, "Player x should have moved");
+    assert_eq!(mod_gold, 9999, "Player gold should be modified");
+
+    // 3. Call reload_scripts with default arguments (clean defaults to true)
+    let reload_default_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "reload_scripts",
+                "arguments": {}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(reload_default_resp["result"]["isError"], false);
+    assert_eq!(
+        reload_default_resp["result"]["content"][0]["text"].as_str().unwrap(),
+        "Reloaded successfully"
+    );
+
+    // Verify state was reset: previously modified player 1 is gone from world state
+    let clean_state = server.logic.export_state().unwrap();
+    assert!(
+        clean_state["players"].get("1").is_none(),
+        "Player state should be completely cleared after clean reload"
+    );
+
+    // When player 1 joins the fresh world, initial coordinates are reset back to (0, 0) and default gold (0)
+    server.logic.on_player_join(1, "token_1").unwrap();
+    let fresh_state = server.logic.export_state().unwrap();
+    assert_eq!(fresh_state["players"]["1"]["x"], 0);
+    assert_eq!(fresh_state["players"]["1"]["y"], 0);
+    assert_ne!(fresh_state["players"]["1"]["gold"], 9999);
+
+    // 4. Modify state again: move player and set gold to 5555
+    for _ in 0..3 {
+        let _ = server.logic.on_input(
+            1,
+            &textcraft::PlayerInput::Key {
+                code: "KeyD".to_string(),
+                shift: false,
+                ctrl: false,
+                alt: false,
+            },
+        );
+        let t = server.handle.increment_server_tick();
+        server.logic.on_tick(0.016, t).unwrap();
+    }
+    server
+        .logic
+        .eval_repl("(set-player 1 (hash-insert (ensure-player 1) \"gold\" 5555))")
+        .unwrap();
+    let mod2_state = server.logic.export_state().unwrap();
+    let mod2_x = mod2_state["players"]["1"]["x"].as_i64().unwrap();
+    let mod2_gold = mod2_state["players"]["1"]["gold"].as_i64().unwrap();
+    assert!(mod2_x > 0);
+    assert_eq!(mod2_gold, 5555);
+
+    // 5. Call reload_scripts with clean: false (lossless hot reload)
+    let reload_lossless_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "reload_scripts",
+                "arguments": {
+                    "clean": false
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(reload_lossless_resp["result"]["isError"], false);
+    assert_eq!(
+        reload_lossless_resp["result"]["content"][0]["text"].as_str().unwrap(),
+        "Reloaded successfully"
+    );
+
+    // Verify modified state is preserved when clean: false
+    let preserved_state = server.logic.export_state().unwrap();
+    assert_eq!(
+        preserved_state["players"]["1"]["x"].as_i64().unwrap(),
+        mod2_x,
+        "Player x coordinate must be preserved when clean: false"
+    );
+    assert_eq!(
+        preserved_state["players"]["1"]["gold"].as_i64().unwrap(),
+        5555,
+        "Player gold must be preserved when clean: false"
+    );
+
+    // 6. Explicit clean: true also resets world state
+    let reload_clean_resp = send_mcp_http_post(
+        &mut server,
+        mcp_addr,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "reload_scripts",
+                "arguments": {
+                    "clean": true
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(reload_clean_resp["result"]["isError"], false);
+    let explicit_clean_state = server.logic.export_state().unwrap();
+    assert!(
+        explicit_clean_state["players"].get("1").is_none(),
+        "Player state should be completely cleared after clean: true reload"
+    );
+
+    server.handle.shutdown();
+}

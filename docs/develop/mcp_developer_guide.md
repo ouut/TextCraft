@@ -145,10 +145,32 @@ Rust 宿主层内置了 **15 个永不失效的核心宿主工具**（即使 `.s
   }
   ```
 
-### 3. `reload_scripts` —— 强制无损热重载 `.scm` 脚本
-无视 `--watch` 开关或 2 秒轮询间隔，立即扫描并重编译 `scripts/` 下的 `.scm` 文件（自动导出并恢复 `*world-state*`）：
-- 编译成功返回 `"Reloaded successfully"`（`isError: false`）；
-- 若新脚本存在括号不匹配等语法错误，自动回滚世界状态并返回详细编译错误栈（`isError: true`），方便 AI 改完 `.scm` 文件后立即自检修复。
+### 3. `reload_scripts` —— 热重载与干净重置 `.scm` 脚本
+无视 `--watch` 开关或 2 秒轮询间隔，立即扫描并重编译 `scripts/` 下的全部 `.scm` 根脚本文件。
+支持可选参数 `clean: bool`（**默认 `true`**）：
+- **干净重置模式（`clean: true`，默认/缺省）**：
+  编译新脚本后，**不恢复旧状态**，主动重新调用 `(engine:on-init)`，以全新初始状态重置世界并刷新画面（递增渲染版本号），适合 AI Agent 重新初始化世界或开发新游戏原型时使用。
+  ```json
+  {
+    "name": "reload_scripts",
+    "arguments": {
+      "clean": true
+    }
+  }
+  ```
+  （注：调用时不传 `arguments` 或省略 `clean` 字段同样默认执行干净重置。）
+- **无损热补丁模式（`clean: false`）**：
+  保持原有的无损热重载逻辑，在编译前导出当前虚拟机状态，并在编译成功后完整恢复 `*world-state*`（用于玩家在线游玩时无缝打热补丁）。
+  ```json
+  {
+    "name": "reload_scripts",
+    "arguments": {
+      "clean": false
+    }
+  }
+  ```
+- **自动安全回滚**：
+  若新脚本存在括号不匹配、未定义变量等语法或编译错误，无论 `clean` 参数为何值，均会自动安全回滚恢复重载前的原有世界状态，并返回详细编译错误栈（`isError: true`），方便 AI Agent 改完 `.scm` 文件后立即自检与修复。
 
 ### 4. `pause_clock` 与 `resume_clock` —— 虚拟模拟时钟暂停与恢复
 - `pause_clock`: 将主物理时钟暂停。世界 `tick(dt)` 推进立即停止，但 WebSocket 网络消息收发、心跳与 MCP 请求正常保活，方便 AI 介入冻结现场并执行精确诊断。
