@@ -476,3 +476,10 @@ AI 甚至无需修改磁盘文件，直接通过 `game_command` 发送 `! (mcp:d
 }
 ```
 随后调用 `tools/list` 即可发现 `gift_gold`，并通过 `tools/call` 直接使用！
+
+---
+
+## 五、 后续优化与演进规划 (TODO)
+
+关于下一阶段将 TextCraft 打磨为工业级自闭环引擎的 8 大深度演进课题（可控随机种子、批量断言、状态按需投影、时序事件流等），请参阅详细规划文档：
+👉 [TextCraft MCP 深度优化与自闭环演进 TODO 规划](file:///workspace/TextCraft/docs/develop/mcp_todo.md)
