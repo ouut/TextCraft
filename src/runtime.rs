@@ -559,81 +559,6 @@ impl TextCraftServer {
         Ok(count)
     }
 
-    // ==========================================
-    // Checkpoint & Time Travel Rollback Methods
-    // ==========================================
-
-    /// Create an in-memory game world snapshot checkpoint into MCP dedicated storage.
-    pub fn create_checkpoint(&mut self, tag: &str) -> Result<serde_json::Value, String> {
-        let tag = if tag.trim().is_empty() {
-            "latest"
-        } else {
-            tag.trim()
-        };
-        let state = self
-            .logic
-            .export_state()
-            .map_err(|e| format!("export_state failed: {}", e))?;
-        let tick = self.handle.server_tick();
-        let timestamp_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        let checkpoint_data = serde_json::json!({
-            "tag": tag,
-            "tick": tick,
-            "timestamp_ms": timestamp_ms,
-            "state": state,
-        });
-
-        let key = format!("checkpoint:{}", tag);
-        self.mcp_storage.write().insert(key, checkpoint_data);
-
-        Ok(serde_json::json!({
-            "success": true,
-            "tag": tag,
-            "tick": tick,
-            "timestamp_ms": timestamp_ms,
-        }))
-    }
-
-    /// Instantly rollback game world state and clock tick to a previously saved checkpoint.
-    pub fn rollback_checkpoint(&mut self, tag: &str) -> Result<serde_json::Value, String> {
-        let tag = if tag.trim().is_empty() {
-            "latest"
-        } else {
-            tag.trim()
-        };
-        let key = format!("checkpoint:{}", tag);
-        let record = {
-            let guard = self.mcp_storage.read();
-            guard.get(&key).cloned()
-        }
-        .ok_or_else(|| format!("Checkpoint '{}' not found in mcp_storage", tag))?;
-
-        let state = record
-            .get("state")
-            .ok_or_else(|| format!("Checkpoint '{}' has no state object", tag))?;
-        let saved_tick = record.get("tick").and_then(|v| v.as_u64()).unwrap_or(0);
-
-        self.logic
-            .import_state(state)
-            .map_err(|e| format!("import_state failed: {}", e))?;
-        self.handle.set_server_tick(saved_tick);
-        self.last_snapshots.clear();
-
-        Ok(serde_json::json!({
-            "success": true,
-            "tag": tag,
-            "restored_tick": saved_tick,
-            "message": format!(
-                "Successfully rolled back to checkpoint '{}' at tick {}",
-                tag, saved_tick
-            ),
-        }))
-    }
-
     /// Returns the bound local socket address.
     pub fn local_addr(&self) -> SocketAddr {
         self.handle.local_addr()
@@ -1215,36 +1140,6 @@ impl TextCraftServer {
                 }
             }),
             serde_json::json!({
-                "name": "create_checkpoint",
-                "description": "Create an in-memory game world snapshot checkpoint into MCP dedicated storage, capturing current world state and server tick.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "tag": {
-                            "type": "string",
-                            "description": "Unique tag/name for this checkpoint (default: 'latest')"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Optional human-readable description of the checkpoint"
-                        }
-                    }
-                }
-            }),
-            serde_json::json!({
-                "name": "rollback_checkpoint",
-                "description": "Instantly rollback game world state and server tick to a previously saved checkpoint in MCP dedicated storage.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "tag": {
-                            "type": "string",
-                            "description": "Tag of the checkpoint to rollback to (default: 'latest')"
-                        }
-                    }
-                }
-            }),
-            serde_json::json!({
                 "name": "mcp_store_export",
                 "description": "Export the entire MCP dedicated storage to a JSON file or inline JSON object.",
                 "inputSchema": {
@@ -1738,34 +1633,6 @@ impl TextCraftServer {
                     serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
                     false,
                 )
-            }
-            "create_checkpoint" => {
-                let tag = arguments
-                    .get("tag")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| arguments.get("name").and_then(|v| v.as_str()))
-                    .unwrap_or("latest");
-                match self.create_checkpoint(tag) {
-                    Ok(out) => (
-                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
-                        false,
-                    ),
-                    Err(err) => (err, true),
-                }
-            }
-            "rollback_checkpoint" => {
-                let tag = arguments
-                    .get("tag")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| arguments.get("name").and_then(|v| v.as_str()))
-                    .unwrap_or("latest");
-                match self.rollback_checkpoint(tag) {
-                    Ok(out) => (
-                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
-                        false,
-                    ),
-                    Err(err) => (err, true),
-                }
             }
             "mcp_store_export" => {
                 if let Some(path_str) = arguments.get("path").and_then(|v| v.as_str()) {

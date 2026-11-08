@@ -504,3 +504,55 @@
     (if handler
         (handler safe-args)
         (hash "error" (string-append "Unknown MCP tool: " tname)))))
+
+;; ----------------------------------------------------------------------------
+;; In-Scheme Checkpoint & Time-Travel Engine (Self-Driving Game Tools)
+;; ----------------------------------------------------------------------------
+
+(define *checkpoints* (hash))
+
+(define (checkpoint:save tag)
+  (let* ((str-tag (if (string? tag) tag (to-string tag)))
+         (safe-tag (if (string=? str-tag "") "latest" str-tag)))
+    (set! *checkpoints* (hash-insert *checkpoints* safe-tag *world-state*))
+    safe-tag))
+
+(define (checkpoint:restore tag)
+  (let* ((str-tag (if (string? tag) tag (to-string tag)))
+         (safe-tag (if (string=? str-tag "") "latest" str-tag))
+         (saved (map-get *checkpoints* safe-tag #f)))
+    (if saved
+        (begin
+          (set! *world-state* saved)
+          (bump-visual-version!)
+          #t)
+        #f)))
+
+;; Expose create_checkpoint and rollback_checkpoint dynamically via mcp:def-tool
+(mcp:def-tool
+  "create_checkpoint"
+  "Scheme 脚本自驱动时光机：在内存中保存当前游戏世界状态快照 (Checkpoint)"
+  (hash "type" "object"
+        "properties" (hash "tag" (hash "type" "string" "description" "快照标签名称 (默认 'latest')")))
+  (lambda (args)
+    (let* ((tag (map-get args "tag" "latest"))
+           (saved-tag (checkpoint:save tag)))
+      (hash "success" #t
+            "tag" saved-tag
+            "message" (string-append "Checkpoint '" saved-tag "' saved successfully in Scheme VM")))))
+
+(mcp:def-tool
+  "rollback_checkpoint"
+  "Scheme 脚本自驱动时光机：瞬间回滚游戏世界状态到指定的历史快照"
+  (hash "type" "object"
+        "properties" (hash "tag" (hash "type" "string" "description" "要回滚的快照标签名称 (默认 'latest')")))
+  (lambda (args)
+    (let* ((tag (map-get args "tag" "latest"))
+           (ok (checkpoint:restore tag)))
+      (if ok
+          (hash "success" #t
+                "tag" tag
+                "message" (string-append "Successfully rolled back to checkpoint '" tag "'"))
+          (hash "success" #f
+                "error" (string-append "Checkpoint '" tag "' not found in Scheme memory"))))))
+

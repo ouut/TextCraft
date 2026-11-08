@@ -94,7 +94,7 @@ curl -s -X POST http://127.0.0.1:8082/mcp \
 
 ## 三、 宿主核心桥接工具：直接复用游戏命令与输入管线
 
-Rust 宿主层内置了 **17 个永不失效的核心宿主工具**（即使 `.scm` 脚本被改坏，AI 依然可以通过它们修复并重载脚本，或执行单步无头调试、数据黑板存取与时光机快照回滚）：
+Rust 宿主层内置了 **15 个永不失效的核心宿主工具**（即使 `.scm` 脚本被改坏，AI 依然可以通过它们修复并重载脚本，或执行单步无头推演与专用 MCP 存储黑板存取）：
 
 ### 1. `game_command` —— 复用游戏底部命令输入框与 `!` 管理员 REPL
 直接复用游戏内命令输入管线，支持两种模式：
@@ -252,43 +252,20 @@ Rust 宿主层内置了 **17 个永不失效的核心宿主工具**（即使 `.s
 }
 ```
 
-### 13. `create_checkpoint` —— 游戏世界时光机快照存储
-自动调用 `logic.export_state()` 获取当前完整游戏世界快照，连同当前 `server_tick` 与微秒时间戳一并存入专用 MCP 存储的 `"checkpoint:<tag>"` 中：
+### 13. `mcp_store_export` —— 导出专用 MCP 存储
+将专用存储完整备份至磁盘文件：
 ```json
-{
-  "name": "create_checkpoint",
-  "arguments": {
-    "tag": "before_boss_fight",
-    "description": "进入魔王房间前的安全存档点"
-  }
-}
-```
-返回 `{ "success": true, "tag": "before_boss_fight", "tick": 1420, "timestamp_ms": 1731000000000 }`。
-
-### 14. `rollback_checkpoint` —— 瞬间回滚游戏世界与时钟
-从专用 MCP 存储中读取 `"checkpoint:<tag>"`，调用 `logic.import_state(&state)` 瞬间恢复游戏世界，并将服务端的 `server_tick` 精确回滚到保存那一刻的帧号：
-```json
-{
-  "name": "rollback_checkpoint",
-  "arguments": {
-    "tag": "before_boss_fight"
-  }
-}
-```
-回滚后同时自动清理渲染帧缓存，保证下一次快照全量重新推送给所有在线客户端。
-
-### 15. `mcp_store_export` 与 `mcp_store_import` —— 独立 MCP 存档导入与导出
-支持将专用存储完整备份至磁盘文件或直接以内联 JSON 对象输出，方便智能体在长周期演化实验中跨会话保存演化黑板：
-```json
-// 导出到磁盘
 {
   "name": "mcp_store_export",
   "arguments": {
     "path": "backups/agent_memory.json"
   }
 }
+```
 
-// 从磁盘导入
+### 14. `mcp_store_import` —— 导入专用 MCP 存储
+从磁盘文件恢复专用存储（支持 `overwrite` 覆盖或合并）：
+```json
 {
   "name": "mcp_store_import",
   "arguments": {
@@ -302,7 +279,77 @@ Rust 宿主层内置了 **17 个永不失效的核心宿主工具**（即使 `.s
 
 ## 四、 Scheme 动态 MCP 工具系统 (`mcp:def-tool`)
 
-### 4.1 预置的 Scheme 游戏开发与调试工具 (`scripts/main.scm`)
+### 4.1 核心范式：时光机快照与回滚的 Scheme 纯脚本自举实现
+
+TextCraft 贯彻**「机制在宿主，策略与功能在脚本」**的极简架构哲学。时光机快照与状态回滚功能完全不需要在 Rust 宿主硬编码死接口，而是由 Scheme 脚本在内存中自管理 `*checkpoints*` 字典，并通过 `(mcp:def-tool ...)` 动态注册给 Agent：
+
+```scheme
+;; scripts/prelude.scm 中的内置自举实现：
+(define *checkpoints* (hash))
+
+(define (checkpoint:save tag)
+  (let* ((str-tag (if (string? tag) tag (to-string tag)))
+         (safe-tag (if (string=? str-tag "") "latest" str-tag)))
+    (set! *checkpoints* (hash-insert *checkpoints* safe-tag *world-state*))
+    safe-tag))
+
+(define (checkpoint:restore tag)
+  (let* ((str-tag (if (string? tag) tag (to-string tag)))
+         (safe-tag (if (string=? str-tag "") "latest" str-tag))
+         (saved (map-get *checkpoints* safe-tag #f)))
+    (if saved
+        (begin
+          (set! *world-state* saved)
+          (bump-visual-version!)
+          #t)
+        #f)))
+
+;; 动态暴露出 create_checkpoint 与 rollback_checkpoint 供 MCP 客户端直接调用
+(mcp:def-tool
+  "create_checkpoint"
+  "Scheme 脚本自驱动时光机：在内存中保存当前游戏世界状态快照 (Checkpoint)"
+  (hash "type" "object"
+        "properties" (hash "tag" (hash "type" "string" "description" "快照标签名称 (默认 'latest')")))
+  (lambda (args)
+    (let* ((tag (map-get args "tag" "latest"))
+           (saved-tag (checkpoint:save tag)))
+      (hash "success" #t
+            "tag" saved-tag
+            "message" (string-append "Checkpoint '" saved-tag "' saved successfully in Scheme VM")))))
+
+(mcp:def-tool
+  "rollback_checkpoint"
+  "Scheme 脚本自驱动时光机：瞬间回滚游戏世界状态到指定的历史快照"
+  (hash "type" "object"
+        "properties" (hash "tag" (hash "type" "string" "description" "要回滚的快照标签名称 (默认 'latest')")))
+  (lambda (args)
+    (let* ((tag (map-get args "tag" "latest"))
+           (ok (checkpoint:restore tag)))
+      (if ok
+          (hash "success" #t
+                "tag" tag
+                "message" (string-append "Successfully rolled back to checkpoint '" tag "'"))
+          (hash "success" #f
+                "error" (string-append "Checkpoint '" tag "' not found in Scheme memory"))))))
+```
+
+#### 调用方式：
+Agent 通过标准 MCP JSON-RPC 直接调用：
+```json
+// 1. 创建快照
+{
+  "name": "create_checkpoint",
+  "arguments": { "tag": "before_boss" }
+}
+
+// 2. 回滚快照
+{
+  "name": "rollback_checkpoint",
+  "arguments": { "tag": "before_boss" }
+}
+```
+
+### 4.2 预置的 Scheme 游戏开发与调试工具 (`scripts/main.scm`)
 
 `scripts/main.scm` 默认通过 `(mcp:def-tool ...)` 注册了 4 个高频工具：
 
@@ -313,7 +360,7 @@ Rust 宿主层内置了 **17 个永不失效的核心宿主工具**（即使 `.s
 | `teleport_player` | `{ "player_id"?: 1, "x": 5, "y": -3 }` | 将指定玩家瞬移至 `(x, y)`，向其 HUD 日志推送 `[mcp] AI 将你传送至 (x, y)`，并触发画面刷新 |
 | `spawn_monster` | `{ "id": "boss_1", "name": "炎魔", "glyph": "B", "x": 4, "y": 2, "hp"?: 120, "attack"?: 18 }` | 在 `(x, y)` 处动态生成新怪物，写入 `*world-state*["monsters"]` 与 `'actor` 图层，并向全服玩家广播警告日志 |
 
-### 4.2 如何用 `(mcp:def-tool ...)` 动态开发新的 MCP 工具
+### 4.3 如何用 `(mcp:def-tool ...)` 动态开发新的 MCP 工具
 
 `scripts/prelude.scm` 提供了极简的声明式注册函数：
 
