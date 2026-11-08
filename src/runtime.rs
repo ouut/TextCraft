@@ -2,7 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -196,6 +196,9 @@ async fn mcp_http_handler(
     }
 }
 
+/// Thread-safe in-memory key-value blackboard storage for MCP agent state, temporary variables, and checkpoints.
+pub type McpStorage = Arc<parking_lot::RwLock<HashMap<String, serde_json::Value>>>;
+
 /// Core server gateway and session scheduling coordinator.
 pub struct TextCraftServer {
     pub handle: ServerHandle<PlayerInput, TextCraftCommand, PlayerSnapshot, TextCraftEvent>,
@@ -206,11 +209,46 @@ pub struct TextCraftServer {
     pub snapshot_heartbeat_ms: u64,
     pub log_level: LogLevel,
     pub is_paused: Arc<AtomicBool>,
+    pub mcp_storage: McpStorage,
     last_snapshots: HashMap<PlayerId, (u64, Instant, u64, PlayerSnapshot)>,
     player_tokens: HashMap<PlayerId, String>,
     last_reload_check: Option<Instant>,
     mcp_rx: Option<tokio::sync::mpsc::UnboundedReceiver<McpRequestMsg>>,
     mcp_addr: Option<SocketAddr>,
+}
+
+/// Resolves a namespace and subkey from optional namespace and key strings.
+///
+/// Priority:
+/// 1. If explicit namespace is given and not empty/default, returns (namespace, stripped_or_original_key).
+/// 2. If key contains ':', splits into (namespace, subkey).
+/// 3. Otherwise returns ("default", key).
+pub fn resolve_namespace_and_key<'a>(
+    namespace: Option<&'a str>,
+    key: &'a str,
+) -> (&'a str, &'a str) {
+    let clean_ns = namespace.map(|s| s.trim()).filter(|s| !s.is_empty());
+    match clean_ns {
+        Some(ns) if ns != "default" => {
+            if let Some(sub) = key.strip_prefix(ns).and_then(|k| k.strip_prefix(':')) {
+                (ns, sub)
+            } else {
+                (ns, key)
+            }
+        }
+        _ => {
+            // Namespace is None or "default"
+            if let Some((ns, sub)) = key.split_once(':') {
+                if !ns.is_empty() && !sub.is_empty() {
+                    (ns, sub)
+                } else {
+                    ("default", key)
+                }
+            } else {
+                ("default", key)
+            }
+        }
+    }
 }
 
 fn hash_json_value<H: Hasher>(val: &serde_json::Value, state: &mut H) {
@@ -268,6 +306,14 @@ impl TextCraftServer {
             let mcp_addr: SocketAddr = format!("{}:{}", args.host, mcp_port).parse()?;
             server.start_mcp_server(mcp_addr).await?;
         }
+        if let Some(save_path) = server.logic.save_file() {
+            let mcp_path = save_path.with_extension("mcp.json");
+            if mcp_path.exists() {
+                if let Err(e) = server.mcp_store_import_from_file(&mcp_path, true) {
+                    tracing::warn!(error = %e, "Failed to load MCP storage from save file");
+                }
+            }
+        }
         Ok(server)
     }
 
@@ -296,6 +342,7 @@ impl TextCraftServer {
             snapshot_heartbeat_ms: 1000,
             log_level: LogLevel::Info,
             is_paused: Arc::new(AtomicBool::new(false)),
+            mcp_storage: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             last_snapshots: HashMap::new(),
             player_tokens: HashMap::new(),
             last_reload_check: None,
@@ -343,6 +390,248 @@ impl TextCraftServer {
     pub fn with_snapshot_heartbeat_ms(mut self, ms: u64) -> Self {
         self.snapshot_heartbeat_ms = ms;
         self
+    }
+
+    // ==========================================
+    // Dedicated MCP Storage & Blackboard Methods
+    // ==========================================
+
+    /// Retrieve a stored value from dedicated MCP storage by key.
+    pub fn mcp_store_get(&self, key: &str) -> Option<serde_json::Value> {
+        self.mcp_store_get_scoped(None, key)
+    }
+
+    /// Store a value into dedicated MCP storage.
+    pub fn mcp_store_set(&self, key: &str, value: serde_json::Value) {
+        self.mcp_store_set_scoped(None, key, value);
+    }
+
+    /// Delete a stored key from dedicated MCP storage.
+    pub fn mcp_store_delete(&self, key: &str) -> bool {
+        self.mcp_store_delete_scoped(None, key)
+    }
+
+    /// List all keys in dedicated MCP storage, optionally filtered by key prefix.
+    pub fn mcp_store_list(&self, prefix: Option<&str>) -> Vec<String> {
+        self.mcp_store_list_scoped(None, prefix)
+    }
+
+    /// Clear all keys across all namespaces in dedicated MCP storage.
+    pub fn mcp_store_clear(&self) {
+        self.mcp_storage.write().clear();
+    }
+
+    /// Retrieve a stored value with explicit namespace support.
+    pub fn mcp_store_get_scoped(
+        &self,
+        namespace: Option<&str>,
+        key: &str,
+    ) -> Option<serde_json::Value> {
+        let (ns, sub) = resolve_namespace_and_key(namespace, key);
+        let composite = format!("{}:{}", ns, sub);
+        let guard = self.mcp_storage.read();
+        guard
+            .get(&composite)
+            .cloned()
+            .or_else(|| guard.get(key).cloned())
+    }
+
+    /// Store a value with explicit namespace support.
+    pub fn mcp_store_set_scoped(
+        &self,
+        namespace: Option<&str>,
+        key: &str,
+        value: serde_json::Value,
+    ) {
+        let (ns, sub) = resolve_namespace_and_key(namespace, key);
+        let composite = format!("{}:{}", ns, sub);
+        let mut guard = self.mcp_storage.write();
+        guard.insert(composite, value);
+    }
+
+    /// Delete a key with explicit namespace support.
+    pub fn mcp_store_delete_scoped(&self, namespace: Option<&str>, key: &str) -> bool {
+        let (ns, sub) = resolve_namespace_and_key(namespace, key);
+        let composite = format!("{}:{}", ns, sub);
+        let mut guard = self.mcp_storage.write();
+        let r1 = guard.remove(&composite).is_some();
+        let r2 = guard.remove(key).is_some();
+        r1 || r2
+    }
+
+    /// List keys filtered by namespace and/or prefix.
+    pub fn mcp_store_list_scoped(
+        &self,
+        namespace: Option<&str>,
+        prefix: Option<&str>,
+    ) -> Vec<String> {
+        let guard = self.mcp_storage.read();
+        if let Some(ns) = namespace.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let ns_prefix = format!("{}:", ns);
+            let mut list: Vec<String> = guard
+                .keys()
+                .filter_map(|k| {
+                    if let Some(sub) = k.strip_prefix(&ns_prefix) {
+                        if prefix.is_none_or(|p| sub.starts_with(p) || k.starts_with(p)) {
+                            Some(sub.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            list.sort();
+            list
+        } else {
+            let mut list: Vec<String> = guard
+                .keys()
+                .filter(|k| prefix.is_none_or(|p| k.starts_with(p)))
+                .cloned()
+                .collect();
+            list.sort();
+            list
+        }
+    }
+
+    /// Clear dedicated MCP storage, optionally limited to a specific namespace.
+    pub fn mcp_store_clear_scoped(&self, namespace: Option<&str>) -> usize {
+        if let Some(ns) = namespace.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let ns_prefix = format!("{}:", ns);
+            let mut guard = self.mcp_storage.write();
+            let to_remove: Vec<String> = guard
+                .keys()
+                .filter(|k| k.starts_with(&ns_prefix))
+                .cloned()
+                .collect();
+            let count = to_remove.len();
+            for k in to_remove {
+                guard.remove(&k);
+            }
+            count
+        } else {
+            let mut guard = self.mcp_storage.write();
+            let count = guard.len();
+            guard.clear();
+            count
+        }
+    }
+
+    /// Export dedicated MCP storage atomically to a JSON file.
+    pub fn mcp_store_export_to_file(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let tmp_path = path.with_extension(format!(
+            "{}.tmp",
+            path.extension().and_then(|s| s.to_str()).unwrap_or("json")
+        ));
+        let guard = self.mcp_storage.read();
+        let content =
+            serde_json::to_string_pretty(&*guard).map_err(std::io::Error::other)?;
+        std::fs::write(&tmp_path, content)?;
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+
+    /// Import entries into dedicated MCP storage from a JSON file.
+    pub fn mcp_store_import_from_file(
+        &self,
+        path: &Path,
+        overwrite: bool,
+    ) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+        let content = std::fs::read_to_string(path)?;
+        let map: HashMap<String, serde_json::Value> =
+            serde_json::from_str(&content).map_err(std::io::Error::other)?;
+        let count = map.len();
+        let mut guard = self.mcp_storage.write();
+        for (k, v) in map {
+            if overwrite || !guard.contains_key(&k) {
+                guard.insert(k, v);
+            }
+        }
+        Ok(count)
+    }
+
+    // ==========================================
+    // Checkpoint & Time Travel Rollback Methods
+    // ==========================================
+
+    /// Create an in-memory game world snapshot checkpoint into MCP dedicated storage.
+    pub fn create_checkpoint(&mut self, tag: &str) -> Result<serde_json::Value, String> {
+        let tag = if tag.trim().is_empty() {
+            "latest"
+        } else {
+            tag.trim()
+        };
+        let state = self
+            .logic
+            .export_state()
+            .map_err(|e| format!("export_state failed: {}", e))?;
+        let tick = self.handle.server_tick();
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let checkpoint_data = serde_json::json!({
+            "tag": tag,
+            "tick": tick,
+            "timestamp_ms": timestamp_ms,
+            "state": state,
+        });
+
+        let key = format!("checkpoint:{}", tag);
+        self.mcp_storage.write().insert(key, checkpoint_data);
+
+        Ok(serde_json::json!({
+            "success": true,
+            "tag": tag,
+            "tick": tick,
+            "timestamp_ms": timestamp_ms,
+        }))
+    }
+
+    /// Instantly rollback game world state and clock tick to a previously saved checkpoint.
+    pub fn rollback_checkpoint(&mut self, tag: &str) -> Result<serde_json::Value, String> {
+        let tag = if tag.trim().is_empty() {
+            "latest"
+        } else {
+            tag.trim()
+        };
+        let key = format!("checkpoint:{}", tag);
+        let record = {
+            let guard = self.mcp_storage.read();
+            guard.get(&key).cloned()
+        }
+        .ok_or_else(|| format!("Checkpoint '{}' not found in mcp_storage", tag))?;
+
+        let state = record
+            .get("state")
+            .ok_or_else(|| format!("Checkpoint '{}' has no state object", tag))?;
+        let saved_tick = record.get("tick").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        self.logic
+            .import_state(state)
+            .map_err(|e| format!("import_state failed: {}", e))?;
+        self.handle.set_server_tick(saved_tick);
+        self.last_snapshots.clear();
+
+        Ok(serde_json::json!({
+            "success": true,
+            "tag": tag,
+            "restored_tick": saved_tick,
+            "message": format!(
+                "Successfully rolled back to checkpoint '{}' at tick {}",
+                tag, saved_tick
+            ),
+        }))
     }
 
     /// Returns the bound local socket address.
@@ -838,6 +1127,157 @@ impl TextCraftServer {
                     "required": ["code"]
                 }
             }),
+            serde_json::json!({
+                "name": "mcp_store_set",
+                "description": "Store or update an arbitrary JSON value in dedicated MCP agent storage (blackboard) without polluting game state or normal saves.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Storage key identifier"
+                        },
+                        "value": {
+                            "description": "Arbitrary JSON value to store (object, array, string, number, bool)"
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional namespace partition (default: 'default')"
+                        }
+                    },
+                    "required": ["key", "value"]
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_get",
+                "description": "Retrieve a stored value from dedicated MCP agent storage by key and optional namespace.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Storage key identifier"
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional namespace partition (default: 'default')"
+                        }
+                    },
+                    "required": ["key"]
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_delete",
+                "description": "Delete a key-value entry from dedicated MCP agent storage.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Storage key identifier"
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional namespace partition (default: 'default')"
+                        }
+                    },
+                    "required": ["key"]
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_list",
+                "description": "List keys stored in dedicated MCP storage filtered by namespace or key prefix.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "prefix": {
+                            "type": "string",
+                            "description": "Optional prefix to filter keys"
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional namespace partition to list within"
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_clear",
+                "description": "Clear all entries in dedicated MCP agent storage, or only entries within a specific namespace.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional namespace to clear. If omitted, clears all entries across all namespaces."
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "create_checkpoint",
+                "description": "Create an in-memory game world snapshot checkpoint into MCP dedicated storage, capturing current world state and server tick.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tag": {
+                            "type": "string",
+                            "description": "Unique tag/name for this checkpoint (default: 'latest')"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional human-readable description of the checkpoint"
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "rollback_checkpoint",
+                "description": "Instantly rollback game world state and server tick to a previously saved checkpoint in MCP dedicated storage.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tag": {
+                            "type": "string",
+                            "description": "Tag of the checkpoint to rollback to (default: 'latest')"
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_export",
+                "description": "Export the entire MCP dedicated storage to a JSON file or inline JSON object.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Optional destination file path on disk. If omitted, returns full storage data inline."
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_import",
+                "description": "Import key-value entries into MCP dedicated storage from a file or inline JSON object.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Optional source file path on disk"
+                        },
+                        "data": {
+                            "type": "object",
+                            "description": "Optional JSON key-value map to import directly"
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Whether to overwrite existing keys (default: true)"
+                        }
+                    }
+                }
+            }),
         ]
     }
 
@@ -1210,6 +1650,207 @@ impl TextCraftServer {
                     }
                 }
             }
+            "mcp_store_set" => {
+                let Some(key) = arguments.get("key").and_then(|v| v.as_str()) else {
+                    return ("Missing required string parameter 'key'".to_string(), true);
+                };
+                if key.trim().is_empty() {
+                    return ("Parameter 'key' cannot be empty".to_string(), true);
+                }
+                let Some(val) = arguments.get("value") else {
+                    return ("Missing required parameter 'value'".to_string(), true);
+                };
+                let namespace = arguments.get("namespace").and_then(|v| v.as_str());
+                self.mcp_store_set_scoped(namespace, key, val.clone());
+                let (ns, sub) = resolve_namespace_and_key(namespace, key);
+                let out = serde_json::json!({
+                    "success": true,
+                    "namespace": ns,
+                    "key": sub,
+                    "composite_key": format!("{}:{}", ns, sub)
+                });
+                (
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                    false,
+                )
+            }
+            "mcp_store_get" => {
+                let Some(key) = arguments.get("key").and_then(|v| v.as_str()) else {
+                    return ("Missing required string parameter 'key'".to_string(), true);
+                };
+                let namespace = arguments.get("namespace").and_then(|v| v.as_str());
+                let (ns, sub) = resolve_namespace_and_key(namespace, key);
+                let val = self.mcp_store_get_scoped(namespace, key);
+                let found = val.is_some();
+                let out = serde_json::json!({
+                    "found": found,
+                    "namespace": ns,
+                    "key": sub,
+                    "value": val.unwrap_or(serde_json::Value::Null)
+                });
+                (
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                    false,
+                )
+            }
+            "mcp_store_delete" => {
+                let Some(key) = arguments.get("key").and_then(|v| v.as_str()) else {
+                    return ("Missing required string parameter 'key'".to_string(), true);
+                };
+                let namespace = arguments.get("namespace").and_then(|v| v.as_str());
+                let (ns, sub) = resolve_namespace_and_key(namespace, key);
+                let deleted = self.mcp_store_delete_scoped(namespace, key);
+                let out = serde_json::json!({
+                    "success": true,
+                    "deleted": deleted,
+                    "namespace": ns,
+                    "key": sub
+                });
+                (
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                    false,
+                )
+            }
+            "mcp_store_list" => {
+                let prefix = arguments.get("prefix").and_then(|v| v.as_str());
+                let namespace = arguments.get("namespace").and_then(|v| v.as_str());
+                let keys = self.mcp_store_list_scoped(namespace, prefix);
+                let out = serde_json::json!({
+                    "namespace": namespace,
+                    "prefix": prefix,
+                    "count": keys.len(),
+                    "keys": keys
+                });
+                (
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                    false,
+                )
+            }
+            "mcp_store_clear" => {
+                let namespace = arguments.get("namespace").and_then(|v| v.as_str());
+                let count = self.mcp_store_clear_scoped(namespace);
+                let out = serde_json::json!({
+                    "success": true,
+                    "namespace": namespace,
+                    "cleared_count": count
+                });
+                (
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                    false,
+                )
+            }
+            "create_checkpoint" => {
+                let tag = arguments
+                    .get("tag")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| arguments.get("name").and_then(|v| v.as_str()))
+                    .unwrap_or("latest");
+                match self.create_checkpoint(tag) {
+                    Ok(out) => (
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                        false,
+                    ),
+                    Err(err) => (err, true),
+                }
+            }
+            "rollback_checkpoint" => {
+                let tag = arguments
+                    .get("tag")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| arguments.get("name").and_then(|v| v.as_str()))
+                    .unwrap_or("latest");
+                match self.rollback_checkpoint(tag) {
+                    Ok(out) => (
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                        false,
+                    ),
+                    Err(err) => (err, true),
+                }
+            }
+            "mcp_store_export" => {
+                if let Some(path_str) = arguments.get("path").and_then(|v| v.as_str()) {
+                    let path = Path::new(path_str);
+                    match self.mcp_store_export_to_file(path) {
+                        Ok(()) => {
+                            let count = self.mcp_storage.read().len();
+                            let out = serde_json::json!({
+                                "success": true,
+                                "path": path_str,
+                                "count": count
+                            });
+                            (
+                                serde_json::to_string_pretty(&out)
+                                    .unwrap_or_else(|_| out.to_string()),
+                                false,
+                            )
+                        }
+                        Err(e) => (
+                            format!("Failed to export MCP store to {}: {}", path_str, e),
+                            true,
+                        ),
+                    }
+                } else {
+                    let guard = self.mcp_storage.read();
+                    let map_val = serde_json::to_value(&*guard).unwrap_or(serde_json::Value::Null);
+                    let out = serde_json::json!({
+                        "count": guard.len(),
+                        "data": map_val
+                    });
+                    (
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                        false,
+                    )
+                }
+            }
+            "mcp_store_import" => {
+                let overwrite = arguments
+                    .get("overwrite")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                if let Some(path_str) = arguments.get("path").and_then(|v| v.as_str()) {
+                    let path = Path::new(path_str);
+                    match self.mcp_store_import_from_file(path, overwrite) {
+                        Ok(count) => {
+                            let out = serde_json::json!({
+                                "success": true,
+                                "path": path_str,
+                                "imported_count": count
+                            });
+                            (
+                                serde_json::to_string_pretty(&out)
+                                    .unwrap_or_else(|_| out.to_string()),
+                                false,
+                            )
+                        }
+                        Err(e) => (
+                            format!("Failed to import MCP store from {}: {}", path_str, e),
+                            true,
+                        ),
+                    }
+                } else if let Some(serde_json::Value::Object(map)) = arguments.get("data") {
+                    let mut imported_count = 0;
+                    let mut guard = self.mcp_storage.write();
+                    for (k, v) in map {
+                        if overwrite || !guard.contains_key(k) {
+                            guard.insert(k.clone(), v.clone());
+                            imported_count += 1;
+                        }
+                    }
+                    let out = serde_json::json!({
+                        "success": true,
+                        "imported_count": imported_count
+                    });
+                    (
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                        false,
+                    )
+                } else {
+                    (
+                        "Missing required parameter: either 'path' or 'data'".to_string(),
+                        true,
+                    )
+                }
+            }
             _ => match self.logic.mcp_call_tool(name, arguments) {
                 Ok(val) => {
                     let is_err = val
@@ -1265,6 +1906,14 @@ impl TextCraftServer {
             {
                 if let Err(e) = self.logic.save_state_to_file() {
                     tracing::error!(error = %e, "Autosave failed");
+                }
+                if let Some(save_path) = self.logic.save_file() {
+                    if !self.mcp_storage.read().is_empty() {
+                        let mcp_path = save_path.with_extension("mcp.json");
+                        if let Err(e) = self.mcp_store_export_to_file(&mcp_path) {
+                            tracing::error!(error = %e, "MCP storage autosave failed");
+                        }
+                    }
                 }
                 last_autosave = now;
             }

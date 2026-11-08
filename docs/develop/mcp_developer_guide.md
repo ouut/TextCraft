@@ -94,7 +94,7 @@ curl -s -X POST http://127.0.0.1:8082/mcp \
 
 ## 三、 宿主核心桥接工具：直接复用游戏命令与输入管线
 
-Rust 宿主层内置了 **8 个永不失效的核心桥接与虚拟模拟工具**（即使 `.scm` 脚本被改坏，AI 依然可以通过它们修复并重载脚本，或执行单步无头调试）：
+Rust 宿主层内置了 **17 个永不失效的核心宿主工具**（即使 `.scm` 脚本被改坏，AI 依然可以通过它们修复并重载脚本，或执行单步无头调试、数据黑板存取与时光机快照回滚）：
 
 ### 1. `game_command` —— 复用游戏底部命令输入框与 `!` 管理员 REPL
 直接复用游戏内命令输入管线，支持两种模式：
@@ -190,6 +190,113 @@ Rust 宿主层内置了 **8 个永不失效的核心桥接与虚拟模拟工具*
 - 若表达式求值为非 `#f`，返回 `{"passed": true, "result": ...}`；
 - 若表达式求值为 `#f` 或发生 Scheme 异常，返回 `{"passed": false, "error": "..."}`。
 使 Agent 具备开箱即用的测试驱动开发（TDD）闭环能力。
+
+### 8. `mcp_store_set` —— 写入专用 MCP 存储 / 智能体黑板
+在 Rust 宿主专用内存存储（Blackboard）中存储或更新任意 JSON 数据，完全不污染游戏脚本的业务状态或正常游戏存档：
+```json
+{
+  "name": "mcp_store_set",
+  "arguments": {
+    "key": "exploration_plan",
+    "value": { "phase": 1, "target": "dungeon_north", "rooms_visited": [101, 102] },
+    "namespace": "agent_alpha"
+  }
+}
+```
+- 参数：`key: string`（必需），`value: any`（必需，任意基本类型/对象/数组），`namespace?: string`（可选命名空间，默认 `"default"`）。
+
+### 9. `mcp_store_get` —— 读取专用 MCP 存储数据项
+根据键名和可选命名空间获取数据。若不存在返回 `{"found": false, "value": null}`：
+```json
+{
+  "name": "mcp_store_get",
+  "arguments": {
+    "key": "exploration_plan",
+    "namespace": "agent_alpha"
+  }
+}
+```
+
+### 10. `mcp_store_delete` —— 删除专用 MCP 存储数据项
+从专用存储中删除指定数据项：
+```json
+{
+  "name": "mcp_store_delete",
+  "arguments": {
+    "key": "exploration_plan",
+    "namespace": "agent_alpha"
+  }
+}
+```
+
+### 11. `mcp_store_list` —— 列出指定命名空间或匹配前缀的键
+列出当前专用存储中的所有键，支持按命名空间过滤或按前缀过滤：
+```json
+{
+  "name": "mcp_store_list",
+  "arguments": {
+    "namespace": "agent_alpha",
+    "prefix": "explor"
+  }
+}
+```
+
+### 12. `mcp_store_clear` —— 清空专用存储
+清空专用存储中全部数据，或仅清空指定命名空间下的数据：
+```json
+{
+  "name": "mcp_store_clear",
+  "arguments": {
+    "namespace": "agent_alpha"
+  }
+}
+```
+
+### 13. `create_checkpoint` —— 游戏世界时光机快照存储
+自动调用 `logic.export_state()` 获取当前完整游戏世界快照，连同当前 `server_tick` 与微秒时间戳一并存入专用 MCP 存储的 `"checkpoint:<tag>"` 中：
+```json
+{
+  "name": "create_checkpoint",
+  "arguments": {
+    "tag": "before_boss_fight",
+    "description": "进入魔王房间前的安全存档点"
+  }
+}
+```
+返回 `{ "success": true, "tag": "before_boss_fight", "tick": 1420, "timestamp_ms": 1731000000000 }`。
+
+### 14. `rollback_checkpoint` —— 瞬间回滚游戏世界与时钟
+从专用 MCP 存储中读取 `"checkpoint:<tag>"`，调用 `logic.import_state(&state)` 瞬间恢复游戏世界，并将服务端的 `server_tick` 精确回滚到保存那一刻的帧号：
+```json
+{
+  "name": "rollback_checkpoint",
+  "arguments": {
+    "tag": "before_boss_fight"
+  }
+}
+```
+回滚后同时自动清理渲染帧缓存，保证下一次快照全量重新推送给所有在线客户端。
+
+### 15. `mcp_store_export` 与 `mcp_store_import` —— 独立 MCP 存档导入与导出
+支持将专用存储完整备份至磁盘文件或直接以内联 JSON 对象输出，方便智能体在长周期演化实验中跨会话保存演化黑板：
+```json
+// 导出到磁盘
+{
+  "name": "mcp_store_export",
+  "arguments": {
+    "path": "backups/agent_memory.json"
+  }
+}
+
+// 从磁盘导入
+{
+  "name": "mcp_store_import",
+  "arguments": {
+    "path": "backups/agent_memory.json",
+    "overwrite": true
+  }
+}
+```
 
 ---
 

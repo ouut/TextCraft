@@ -5,8 +5,8 @@ pub mod types;
 pub use clap;
 pub use logic::{compute_json_diff, OutboundMessage, SchemeLogic};
 pub use runtime::{
-    run_server, strip_ansi_codes, LogLevel, ServerArgs, ServerHandleExt, TextCraftServer,
-    EMBEDDED_WEB_ASSETS,
+    resolve_namespace_and_key, run_server, strip_ansi_codes, LogLevel, McpStorage, ServerArgs,
+    ServerHandleExt, TextCraftServer, EMBEDDED_WEB_ASSETS,
 };
 pub use types::*;
 

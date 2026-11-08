@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use parking_lot::Mutex;
 use rand::Rng;
@@ -262,6 +262,11 @@ impl SchemeLogic {
     /// Whether this logic instance has a configured save file path.
     pub fn has_save_file(&self) -> bool {
         self.save_file.is_some()
+    }
+
+    /// Returns the configured save file path if any.
+    pub fn save_file(&self) -> Option<&Path> {
+        self.save_file.as_deref()
     }
 
     /// Whether script hot reloading file watcher is enabled.
