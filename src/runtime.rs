@@ -196,8 +196,7 @@ async fn mcp_http_handler(
     }
 }
 
-/// Thread-safe in-memory key-value blackboard storage for MCP agent state, temporary variables, and checkpoints.
-pub type McpStorage = Arc<parking_lot::RwLock<HashMap<String, serde_json::Value>>>;
+pub use crate::types::{resolve_namespace_and_key, McpStorage};
 
 /// Core server gateway and session scheduling coordinator.
 pub struct TextCraftServer {
@@ -215,40 +214,6 @@ pub struct TextCraftServer {
     last_reload_check: Option<Instant>,
     mcp_rx: Option<tokio::sync::mpsc::UnboundedReceiver<McpRequestMsg>>,
     mcp_addr: Option<SocketAddr>,
-}
-
-/// Resolves a namespace and subkey from optional namespace and key strings.
-///
-/// Priority:
-/// 1. If explicit namespace is given and not empty/default, returns (namespace, stripped_or_original_key).
-/// 2. If key contains ':', splits into (namespace, subkey).
-/// 3. Otherwise returns ("default", key).
-pub fn resolve_namespace_and_key<'a>(
-    namespace: Option<&'a str>,
-    key: &'a str,
-) -> (&'a str, &'a str) {
-    let clean_ns = namespace.map(|s| s.trim()).filter(|s| !s.is_empty());
-    match clean_ns {
-        Some(ns) if ns != "default" => {
-            if let Some(sub) = key.strip_prefix(ns).and_then(|k| k.strip_prefix(':')) {
-                (ns, sub)
-            } else {
-                (ns, key)
-            }
-        }
-        _ => {
-            // Namespace is None or "default"
-            if let Some((ns, sub)) = key.split_once(':') {
-                if !ns.is_empty() && !sub.is_empty() {
-                    (ns, sub)
-                } else {
-                    ("default", key)
-                }
-            } else {
-                ("default", key)
-            }
-        }
-    }
 }
 
 fn hash_json_value<H: Hasher>(val: &serde_json::Value, state: &mut H) {
@@ -333,6 +298,8 @@ impl TextCraftServer {
         >(config)
         .await?;
 
+        let mcp_storage = logic.mcp_storage.clone();
+
         Ok(Self {
             handle,
             logic,
@@ -342,7 +309,7 @@ impl TextCraftServer {
             snapshot_heartbeat_ms: 1000,
             log_level: LogLevel::Info,
             is_paused: Arc::new(AtomicBool::new(false)),
-            mcp_storage: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            mcp_storage,
             last_snapshots: HashMap::new(),
             player_tokens: HashMap::new(),
             last_reload_check: None,

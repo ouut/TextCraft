@@ -279,24 +279,44 @@ Rust 宿主层内置了 **15 个永不失效的核心宿主工具**（即使 `.s
 
 ## 四、 Scheme 动态 MCP 工具系统 (`mcp:def-tool`)
 
-### 4.1 核心范式：时光机快照与回滚的 Scheme 纯脚本自举实现
+### 4.1 核心范式：时光机快照与专用 MCP 存储（mcp-store）的纯脚本自举实现
 
-TextCraft 贯彻**「机制在宿主，策略与功能在脚本」**的极简架构哲学。时光机快照与状态回滚功能完全不需要在 Rust 宿主硬编码死接口，而是由 Scheme 脚本在内存中自管理 `*checkpoints*` 字典，并通过 `(mcp:def-tool ...)` 动态注册给 Agent：
+TextCraft 贯彻**「机制在宿主，策略与功能在脚本」**的极简架构哲学。
+Rust 宿主仅提供一组通用的专用存储 KV 桥接原语（`engine:raw-mcp-store-*` 与 Scheme 封装函数 `(mcp-store:set! ...)`、`(mcp-store:get ...)`），完全不需要在宿主为快照特化硬编码接口。
+
+Scheme 脚本利用通用存储原语，将快照写入专用 MCP 存储的 `"checkpoint"` 命名空间中，并通过 `(mcp:def-tool ...)` 动态注册给 Agent：
 
 ```scheme
-;; scripts/prelude.scm 中的内置自举实现：
-(define *checkpoints* (hash))
+;; scripts/prelude.scm 中的通用存取封装与时光机实现：
 
+;; 1. 通用 MCP 存储操作函数（支持任意命名空间）
+(define (mcp-store:set! key val . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-set! key val ns)))
+
+(define (mcp-store:get key . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-get key ns)))
+
+(define (mcp-store:list . rest)
+  (let ((ns (if (null? rest) "" (car rest))))
+    (engine:raw-mcp-store-list ns)))
+
+(define (mcp-store:delete! key . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-delete! key ns)))
+
+;; 2. 基于 mcp-store 的快照保存与回滚
 (define (checkpoint:save tag)
   (let* ((str-tag (if (string? tag) tag (to-string tag)))
          (safe-tag (if (string=? str-tag "") "latest" str-tag)))
-    (set! *checkpoints* (hash-insert *checkpoints* safe-tag *world-state*))
+    (engine:raw-mcp-store-set! safe-tag *world-state* "checkpoint")
     safe-tag))
 
 (define (checkpoint:restore tag)
   (let* ((str-tag (if (string? tag) tag (to-string tag)))
          (safe-tag (if (string=? str-tag "") "latest" str-tag))
-         (saved (map-get *checkpoints* safe-tag #f)))
+         (saved (engine:raw-mcp-store-get safe-tag "checkpoint")))
     (if saved
         (begin
           (set! *world-state* saved)
@@ -304,10 +324,10 @@ TextCraft 贯彻**「机制在宿主，策略与功能在脚本」**的极简架
           #t)
         #f)))
 
-;; 动态暴露出 create_checkpoint 与 rollback_checkpoint 供 MCP 客户端直接调用
+;; 3. 动态暴露出 create_checkpoint 与 rollback_checkpoint 供 MCP 客户端直接调用
 (mcp:def-tool
   "create_checkpoint"
-  "Scheme 脚本自驱动时光机：在内存中保存当前游戏世界状态快照 (Checkpoint)"
+  "Scheme 脚本自驱动时光机：在专用 MCP 存储中保存当前游戏世界状态快照 (Checkpoint)"
   (hash "type" "object"
         "properties" (hash "tag" (hash "type" "string" "description" "快照标签名称 (默认 'latest')")))
   (lambda (args)
@@ -315,11 +335,12 @@ TextCraft 贯彻**「机制在宿主，策略与功能在脚本」**的极简架
            (saved-tag (checkpoint:save tag)))
       (hash "success" #t
             "tag" saved-tag
-            "message" (string-append "Checkpoint '" saved-tag "' saved successfully in Scheme VM")))))
+            "namespace" "checkpoint"
+            "message" (string-append "Checkpoint '" saved-tag "' saved to dedicated mcp-store successfully")))))
 
 (mcp:def-tool
   "rollback_checkpoint"
-  "Scheme 脚本自驱动时光机：瞬间回滚游戏世界状态到指定的历史快照"
+  "Scheme 脚本自驱动时光机：从专用 MCP 存储中瞬间回滚游戏世界状态"
   (hash "type" "object"
         "properties" (hash "tag" (hash "type" "string" "description" "要回滚的快照标签名称 (默认 'latest')")))
   (lambda (args)
@@ -330,8 +351,13 @@ TextCraft 贯彻**「机制在宿主，策略与功能在脚本」**的极简架
                 "tag" tag
                 "message" (string-append "Successfully rolled back to checkpoint '" tag "'"))
           (hash "success" #f
-                "error" (string-append "Checkpoint '" tag "' not found in Scheme memory"))))))
+                "error" (string-append "Checkpoint '" tag "' not found in mcp-store"))))))
 ```
+
+#### 架构收益：
+1. **统一黑板与持久化**：所有快照统一沉淀于 `mcp_storage` 的 `"checkpoint"` 命名空间。AI Agent 调用 `mcp_store_export` 时，快照随同演化黑板一起导出至磁盘，支持跨进程会话恢复。
+2. **统一巡检**：Agent 可直接调用 `mcp_store_list(namespace: "checkpoint")` 查询当前所有快照标签。
+3. **极简基座**：Rust 宿主零特化业务代码，机制通用，策略全部自举在 Scheme 脚本中。
 
 #### 调用方式：
 Agent 通过标准 MCP JSON-RPC 直接调用：

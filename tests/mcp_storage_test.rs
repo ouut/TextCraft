@@ -403,6 +403,13 @@ async fn test_checkpoint_and_time_travel_rollback() {
     assert_eq!(cp_data["success"], true);
     assert_eq!(cp_data["tag"], "initial");
 
+    // Checkpoint is directly accessible in dedicated MCP storage under "checkpoint" namespace
+    let stored_cp = server.mcp_store_get_scoped(Some("checkpoint"), "initial");
+    assert!(stored_cp.is_some(), "Checkpoint 'initial' must be stored in mcp-store under 'checkpoint' namespace");
+    let cp_val = stored_cp.unwrap();
+    assert!(cp_val.get("players").is_some());
+    assert_eq!(cp_val["players"]["1"]["x"], init_x);
+
     // 3. Advance simulation and modify game state: step 20 ticks, inject move KeyD
     for _ in 0..20 {
         let _ = server.logic.on_input(
@@ -449,6 +456,14 @@ async fn test_checkpoint_and_time_travel_rollback() {
         serde_json::from_str(cp2_resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(cp2_data["success"], true);
     assert_eq!(cp2_data["tag"], "after_move");
+
+    let stored_after = server.mcp_store_get_scoped(Some("checkpoint"), "after_move");
+    assert!(stored_after.is_some());
+    assert_eq!(stored_after.unwrap()["players"]["1"]["x"], moved_x);
+
+    let cp_keys = server.mcp_store_list_scoped(Some("checkpoint"), None);
+    assert!(cp_keys.contains(&"initial".to_string()));
+    assert!(cp_keys.contains(&"after_move".to_string()));
 
     // Further modify state: player moves further
     for _ in 0..10 {
@@ -645,4 +660,53 @@ async fn test_mcp_storage_file_persistence_and_no_game_save_pollution() {
 
     server.handle.shutdown();
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_scheme_direct_mcp_store_functions() {
+    let scripts_dir = get_scripts_dir();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let config = ServerConfig::new(addr).with_embedded_assets(&EMBEDDED_WEB_ASSETS);
+    let mut logic = SchemeLogic::new(&scripts_dir, false, None).unwrap();
+    logic.init().unwrap();
+
+    let mut server = TextCraftServer::start_with_config(config, logic, "admin".to_string(), 1.0, 0)
+        .await
+        .unwrap();
+
+    // 1. Write from Scheme REPL to default namespace
+    let set_res = server.logic.eval_repl("(mcp-store:set! \"agent_state\" (hash \"stage\" \"init\" \"hp_threshold\" 30))").unwrap();
+    assert!(set_res.contains("#true") || set_res.contains("#t"));
+
+    // Rust sees it immediately in mcp_storage
+    let stored = server.mcp_store_get("agent_state");
+    assert_eq!(
+        stored,
+        Some(json!({"stage": "init", "hp_threshold": 30}))
+    );
+
+    // 2. Write from Scheme REPL to explicit namespace "blackboard"
+    let set_bb = server.logic.eval_repl("(mcp-store:set! \"boss_weakness\" \"fire\" \"blackboard\")").unwrap();
+    assert!(set_bb.contains("#true") || set_bb.contains("#t"));
+
+    // Rust sees it in scoped namespace
+    assert_eq!(
+        server.mcp_store_get_scoped(Some("blackboard"), "boss_weakness"),
+        Some(json!("fire"))
+    );
+
+    // 3. Scheme reads value back
+    let get_val = server.logic.eval_repl("(mcp-store:get \"boss_weakness\" \"blackboard\")").unwrap();
+    assert!(get_val.contains("fire"));
+
+    // 4. Scheme lists keys in namespace
+    let list_val = server.logic.eval_repl("(mcp-store:list \"blackboard\")").unwrap();
+    assert!(list_val.contains("boss_weakness"));
+
+    // 5. Scheme deletes key
+    let del_res = server.logic.eval_repl("(mcp-store:delete! \"agent_state\")").unwrap();
+    assert!(del_res.contains("#true") || del_res.contains("#t"));
+    assert_eq!(server.mcp_store_get("agent_state"), None);
+
+    server.handle.shutdown();
 }

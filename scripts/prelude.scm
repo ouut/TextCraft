@@ -506,21 +506,39 @@
         (hash "error" (string-append "Unknown MCP tool: " tname)))))
 
 ;; ----------------------------------------------------------------------------
-;; In-Scheme Checkpoint & Time-Travel Engine (Self-Driving Game Tools)
+;; Dedicated MCP Storage & Blackboard Scheme Wrappers
 ;; ----------------------------------------------------------------------------
 
-(define *checkpoints* (hash))
+(define (mcp-store:set! key val . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-set! key val ns)))
+
+(define (mcp-store:get key . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-get key ns)))
+
+(define (mcp-store:list . rest)
+  (let ((ns (if (null? rest) "" (car rest))))
+    (engine:raw-mcp-store-list ns)))
+
+(define (mcp-store:delete! key . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-delete! key ns)))
+
+;; ----------------------------------------------------------------------------
+;; In-Scheme Checkpoint & Time-Travel Engine (Backed by Dedicated MCP Storage)
+;; ----------------------------------------------------------------------------
 
 (define (checkpoint:save tag)
   (let* ((str-tag (if (string? tag) tag (to-string tag)))
          (safe-tag (if (string=? str-tag "") "latest" str-tag)))
-    (set! *checkpoints* (hash-insert *checkpoints* safe-tag *world-state*))
+    (engine:raw-mcp-store-set! safe-tag *world-state* "checkpoint")
     safe-tag))
 
 (define (checkpoint:restore tag)
   (let* ((str-tag (if (string? tag) tag (to-string tag)))
          (safe-tag (if (string=? str-tag "") "latest" str-tag))
-         (saved (map-get *checkpoints* safe-tag #f)))
+         (saved (engine:raw-mcp-store-get safe-tag "checkpoint")))
     (if saved
         (begin
           (set! *world-state* saved)
@@ -531,7 +549,7 @@
 ;; Expose create_checkpoint and rollback_checkpoint dynamically via mcp:def-tool
 (mcp:def-tool
   "create_checkpoint"
-  "Scheme 脚本自驱动时光机：在内存中保存当前游戏世界状态快照 (Checkpoint)"
+  "Scheme 脚本自驱动时光机：在专用 MCP 存储中保存当前游戏世界状态快照 (Checkpoint)"
   (hash "type" "object"
         "properties" (hash "tag" (hash "type" "string" "description" "快照标签名称 (默认 'latest')")))
   (lambda (args)
@@ -539,11 +557,12 @@
            (saved-tag (checkpoint:save tag)))
       (hash "success" #t
             "tag" saved-tag
-            "message" (string-append "Checkpoint '" saved-tag "' saved successfully in Scheme VM")))))
+            "namespace" "checkpoint"
+            "message" (string-append "Checkpoint '" saved-tag "' saved to dedicated mcp-store successfully")))))
 
 (mcp:def-tool
   "rollback_checkpoint"
-  "Scheme 脚本自驱动时光机：瞬间回滚游戏世界状态到指定的历史快照"
+  "Scheme 脚本自驱动时光机：从专用 MCP 存储中瞬间回滚游戏世界状态"
   (hash "type" "object"
         "properties" (hash "tag" (hash "type" "string" "description" "要回滚的快照标签名称 (默认 'latest')")))
   (lambda (args)
@@ -554,5 +573,5 @@
                 "tag" tag
                 "message" (string-append "Successfully rolled back to checkpoint '" tag "'"))
           (hash "success" #f
-                "error" (string-append "Checkpoint '" tag "' not found in Scheme memory"))))))
+                "error" (string-append "Checkpoint '" tag "' not found in mcp-store"))))))
 
