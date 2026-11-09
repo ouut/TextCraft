@@ -37,7 +37,10 @@ fn test_empty_scripts_graceful_fallbacks_and_defaults() {
     assert!(tick_res.is_ok());
 
     // Verify default minimal snapshot (80x24 empty screen + empty HUD)
-    let snapshot = logic.render_snapshot(1).expect("render_snapshot should return default minimalist snapshot");
+    let snapshot = logic
+        .render_snapshot(1)
+        .expect("render_snapshot should return default minimalist snapshot")
+        .expect("snapshot should be Some");
     assert_eq!(snapshot.cols, 80);
     assert_eq!(snapshot.rows, 24);
     assert_eq!(snapshot.screen, "");
