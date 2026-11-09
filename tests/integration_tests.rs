@@ -176,6 +176,7 @@ async fn test_2b_http_asset_serving_custom_web_directory() {
         save_file: None,
         autosave_sec: 0,
         snapshot_heartbeat_ms: 1000,
+        heartbeat_timeout_secs: 30,
         mcp_port: None,
         web_dir: Some(temp_dir.clone()),
     };
