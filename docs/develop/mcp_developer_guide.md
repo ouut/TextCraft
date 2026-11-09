@@ -539,7 +539,89 @@ AI 甚至无需修改磁盘文件，直接通过 `game_command` 发送 `! (mcp:d
 
 ---
 
-## 五、 后续优化与演进规划 (TODO)
+## 五、 自驱引擎（Self-Driving Engine）高级特性实战指南
 
-关于下一阶段将 TextCraft 打磨为工业级自闭环引擎的 8 大深度演进课题（可控随机种子、批量断言、状态按需投影、时序事件流等），请参阅详细规划文档：
-👉 [TextCraft MCP 深度优化与自闭环演进 TODO 规划](file:///workspace/TextCraft/docs/develop/mcp_todo.md)
+TextCraft 3.0 内置了完整的自驱化能力矩阵，支持 AI Agent 实现「编码 -> 干净重载 -> 无头仿真 -> 批量断言 -> 状态差分 -> 时空回滚」的工业级自主开发闭环：
+
+### 5.1 确定性伪随机仿真与可复现性（PRNG Seed）
+- **痛点**：随机暴击、怪物游走等机制会导致单元测试偶发失败（Flaky Tests）。
+- **用法**：
+  ```json
+  {
+    "name": "step_simulation",
+    "arguments": {
+      "steps": 10,
+      "seed": 4242
+    }
+  }
+  ```
+  在推演前配置确定性伪随机种子，保证相同初始状态 + 相同种子 + 相同按键序列 = **100% 绝对一致的推演轨迹**，Bug 可精准单步抓包重现。
+
+### 5.2 批量断言与富差值测试套件（Batch Assertions & Rich Diff）
+- **用法**：配合 Scheme 内置原语 `(assert:equal actual expected)` 与 `(assert:true cond)`：
+  ```json
+  {
+    "name": "eval_assertion",
+    "arguments": {
+      "exprs": [
+        "(= (+ 2 3) 5)",
+        "(assert:equal (get-gold 1) 20)",
+        "(assert:true (> (get-hp 1) 0))"
+      ]
+    }
+  }
+  ```
+  一次 MCP 请求返回全量汇总报告，包含 `total`、`passed`、`failed`、`all_passed`，以及包含 `expected` 与 `actual` 语义差值的 `failures` 列表，大幅减少通信轮次与 Token 消耗。
+
+### 5.3 状态按需投影与字段掩码（State Projection & Masking）
+- **用法**：通过点分隔路径抽取关键字段，屏蔽庞大的分块地图（`chunks`）：
+  ```json
+  {
+    "name": "query_state",
+    "arguments": {
+      "paths": ["tick_count", "players.1.x", "players.1.hp", "monsters"]
+    }
+  }
+  ```
+  在 `step_simulation` 中同样支持传入 `"state_projection": ["players.1.x", "tick_count"]`，将推演输出压缩 95% 以上。
+
+### 5.4 状态增量路径过滤（Scoped State Diff）
+- **用法**：
+  ```json
+  {
+    "name": "get_state_diff",
+    "arguments": {
+      "path_prefix": "players.1",
+      "exclude_keys": ["chunks"]
+    }
+  }
+  ```
+  `step_simulation` 默认自动排除不变的 `["chunks"]` 瓦片，仅输出玩家与核心实体的数值差分。
+
+### 5.5 连续输入与物理时序（Continuous Input & Hold Ticks）
+- **用法**：在 `step_simulation` 中传入 `"hold_ticks": N`，自动注入 KeyDown并在推演期间维持按住状态，第 N 步结束时自动发送 KeyUp：
+  ```json
+  {
+    "name": "step_simulation",
+    "arguments": {
+      "steps": 5,
+      "hold_ticks": 5,
+      "inputs": [
+        { "step": 0, "player_id": 1, "type": "key", "code": "KeyD" }
+      ]
+    }
+  }
+  ```
+  解锁蓄力跳跃、平台跑酷与长按加速等即时物理玩法。
+
+### 5.6 干净世界重置（Clean State Reset）
+- **用法**：在调试死局或需要重新开局时，无需重启进程：
+  ```json
+  {
+    "name": "reload_scripts",
+    "arguments": {
+      "clean": true
+    }
+  }
+  ```
+  一键清空运行时状态、重新执行 `(engine:on-init)` 并重置客户端视口，直接回到绝对干净的虚拟世界原点。

@@ -1,6 +1,63 @@
 # TextCraft 版本演进与架构变更日志 (Changelog)
 
-本文档记录 TextCraft 从 `v3.0.0` 到 `v3.2.0` 的核心架构演进、全量缺陷修复、性能优化及开发者体验升级。
+本文档记录 TextCraft 从 `v3.0.0` 到 `v3.3.0` 的核心架构演进、全量缺陷修复、性能优化及开发者体验升级。
+
+---
+
+## [v3.3.0] - 2026-11-09
+
+### 1. Agent-in-the-Loop 自驱游戏开发引擎矩阵
+- **可控随机种子与确定性推演 (Deterministic PRNG & Seed)**：
+  - 引入 `rand::rngs::StdRng`，支持 `seed_from_u64`，由 Rust 宿主受控驱动；
+  - Scheme 注入 `(engine:random-int lo hi [seed])`、`(random:seed! n)`、`(random:reset!)`；
+  - MCP 工具 `step_simulation` 支持可选参数 `"seed": 12345`，彻底消除测试 Flaky 抖动，实现 Bug 100% 确定性单步重现。
+- **批量断言与富差值对比 (Batch Assertions & Rich Diff)**：
+  - `eval_assertion` 支持传入批量表达式数组 `"exprs": string[]`；
+  - Scheme 内置 `(assert:equal actual expected)` 与 `(assert:true cond)` 断言原语；
+  - 单次调用返回包含 `total`、`passed`、`failed`、`all_passed` 以及包含期望值与实际值语义差值的结构化 `failures` 列表。
+- **状态按需投影与字段掩码 (State Projection & Masking)**：
+  - 新增专用 MCP 工具 `query_state(paths)`，支持点分隔路径（如 `["tick_count", "players.1.hp"]`）抽取目标字段；
+  - `step_simulation` 增加 `"state_projection"` 可选参数，推演直接返回投影像，避免数百 KB 全量状态撑爆大模型 Context。
+- **时序事件流与全局遥测 (Temporal Event Telemetry)**：
+  - Scheme 引入 `*current-tick*` 全局时间戳，在 `(engine:on-tick dt tick)` 中帧级同步；
+  - `(player:add-log pid channel text)` 写入的所有日志条目自动注入 `"tick": current_tick`，精确归因每一步事件。
+- **状态增量路径过滤 (Scoped State Diff)**：
+  - `get_state_diff` 与 `step_simulation` 引入 `path_prefix` 与 `exclude_keys`；
+  - 默认过滤 `["chunks"]` 庞大瓦片树噪声，聚焦核心实体与业务数值变动。
+- **连续输入与物理时序 (Continuous Input & KeyUp/Hold)**：
+  - `PlayerInput::Key` 协议扩展 `action: KeyAction { Down, Up }`；
+  - Web 前端接入 `keyup` 监听器，触发 `TextCraft.sendKey(code, { action: 'up' })`；
+  - Scheme 提供 `(player:handle-key-action! pid code action)`、`(player:key-pressed? pid code)` 与 `(player:key-hold-ticks pid code)`；
+  - `step_simulation` 支持 `"hold_ticks": N`，推演期间自动维持长按并在结束时自动发送释放事件。
+
+### 2. 虚拟时钟无头模拟、状态差分与干净重载
+- **时钟控制与多步无头仿真**：
+  - 新增 MCP 工具 `pause_clock` 与 `resume_clock`，支持暂停物理主循环进行现场诊断；
+  - 新增 MCP 工具 `step_simulation`，支持以指定步长和步数无头推演世界并安全注入按键/指令序列。
+- **干净重置机制 (Clean State Reset)**：
+  - `reload_scripts` 支持可选参数 `clean: bool`（**默认 `true`**）；
+  - 重新编译脚本后清空旧状态、重新执行 `(engine:on-init)` 并重置视口，一指令回到干净世界原点。
+
+### 3. 专用 MCP 智能体存储黑板 (Dedicated Agent Blackboard)
+- **Rust 宿主专用内存存储**：
+  - 提供 `mcp_store_set`、`mcp_store_get`、`mcp_store_delete`、`mcp_store_list`、`mcp_store_clear`、`mcp_store_export`、`mcp_store_import`；
+  - 支持多 Agent 命名空间隔离，完全不污染游戏业务状态或正常游戏存档；
+  - Scheme 端注入原生桥接函数 `(mcp:store-*)`，并动态自举 `create_checkpoint` 与 `rollback_checkpoint` 时光机工具。
+
+### 4. Scheme 权威视口脏检测与网络防抖
+- **权威脏检查自治**：
+  - `(engine:render-snapshot pid)` 在视口与 HUD 未变更时返回 `#f`，宿主跳过 ANSI 光栅化与网络推流；
+  - 简化快照缓存模型为 `(Instant, PlayerSnapshot)`，降低内存与哈希开销。
+- **心跳超时放宽与前端防休眠**：
+  - CLI 新增 `--heartbeat-timeout-secs`（默认 30s）；
+  - 前端监听 `visibilitychange` 与 `focus` 事件，切回页面时主动发送 Ping 保活。
+- **外部静态资源探测 (`--web-dir`)**：
+  - 支持 `--web-dir` 选项，遵循「显式参数 > 本地 `./web` > 编译内嵌」三级探测机制。
+
+### 5. Scheme 生命周期钩子优雅降级与富诊断
+- **钩子自动感知与平滑降级**：
+  - 自动检测已定义的钩子函数并建立缓存注册表（`registered_hooks`），未实现的生命周期自动优雅兜底跳过；
+  - REPL 求值与编译错误提供包含文件路径、行号、列号、代码高亮切片与调用栈的富文本诊断报告。
 
 ---
 

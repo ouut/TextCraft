@@ -68,10 +68,14 @@ TextCraft/
   ├── web/
   │   └── index.html                # 极简 Hybrid Web 客户端 (内置 window.TextCraft SDK 与基础 HUD)
   ├── tests/
-  │   ├── integration_tests.rs      # 8 个端到端集成测试套件
-  │   ├── server_gateway_test.rs    # 2 个服务端网关与生命周期测试
-  │   ├── snapshot_dedup_test.rs    # 4 个快照去重与保活心跳测试
-  │   └── phase5_verification_test.rs # 8 个全链路回归、多用户身份与性能基准测试
+  │   ├── integration_tests.rs           # 9 个端到端集成测试套件
+  │   ├── server_gateway_test.rs         # 2 个服务端网关与生命周期测试
+  │   ├── snapshot_dedup_test.rs         # 4 个快照去重与保活心跳测试
+  │   ├── phase5_verification_test.rs    # 9 个全链路回归、多用户身份与性能基准测试
+  │   ├── graceful_scheme_hooks_test.rs  # 4 个 Scheme 钩子优雅降级与富诊断测试
+  │   ├── headless_simulation_test.rs    # 4 个无头物理推演与时钟控制测试
+  │   ├── mcp_storage_test.rs            # 6 个专用 MCP 存储黑板与时光机回滚测试
+  │   └── advanced_mcp_features_test.rs  # 6 个自驱仿真特性（种子/断言/掩码/时序）测试
   ├── scripts/
   │   ├── prelude.scm               # 16x16 Chunk 分块存储、ANSI RLE 光栅化器与 HUD 构建器
   │   └── main.scm                  # 地图生成、碰撞检测、战斗伤害、AI 与变频控制
@@ -79,12 +83,14 @@ TextCraft/
   ├── build.ps1                     # 本地打包脚本 (Windows PowerShell)
   └── docs/
       ├── develop/
-      │   ├── agent_developer_guide.md # 游戏 (Scheme) 与前端 (HUD SDK) Agent 开发者综合指南
-      │   └── mcp_developer_guide.md   # MCP (Model Context Protocol) 开发者与 AI 协同开发指南
+      │   ├── agent_developer_guide.md       # 游戏 (Scheme) 与前端 (HUD SDK) Agent 开发者完全指南
+      │   ├── mcp_developer_guide.md         # MCP (Model Context Protocol) 开发者与 AI 自驱协同指南
+      │   ├── steel_scheme_reference.md      # Steel Scheme 0.8.3 内置标准库与核心函数参考手册
+      │   └── steel_scheme_best_practices.md # Steel Scheme 代码开发最佳实践（从入门到快到起飞）
       └── project/                  # 本项目（引擎宿主）开发文档
           ├── specification_3.0.0.md # 引擎 3.0 架构与技术规范
           ├── agents_3.0.0.md       # 引擎开发多智能体协作规范
-          └── changelog.md          # 版本演进与架构变更日志 (v3.0.0 -> v3.2.0)
+          └── changelog.md          # 版本演进与架构变更日志 (v3.0.0 -> v3.3.0)
 ```
 
 ---
@@ -102,7 +108,7 @@ cd TextCraft
 ### 3.2 编译与测试
 
 ```bash
-# 运行全套单元测试与端到端集成测试 (10 个单元测试 + 10 个端到端集成测试)
+# 运行全套单元测试与端到端集成测试 (15 个单元测试 + 44 个端到端测试，共 59 项测试全部通过)
 cargo test
 
 # 代码质量检查 (严格零 Warning)
@@ -182,6 +188,7 @@ cargo run -- --port 8081 --mcp-port 8082 -w --log-level debug
 | `--save-file <path>` | `save_file` | `PathBuf` | `None` | 世界纯数据状态存档路径（原子保存与断点恢复；未指定则不落盘） |
 | `--autosave-sec <sec>` | `autosave_sec` | `u64` | `30` | 自动定时存档周期（单位：秒；设为 `0` 时禁用自动存档） |
 | `--snapshot-heartbeat-ms <ms>` | `snapshot_heartbeat_ms` | `u64` | `1000` | 快照保活心跳周期（毫秒；未变脏时跳过推流，达到周期时使用缓存快照保活重发；设为 `0` 禁用去重） |
+| `--heartbeat-timeout-secs <sec>` | `heartbeat_timeout_secs` | `u64` | `30` | 客户端心跳超时判定阈值（秒；连接空闲超过该阈值判定离线，触发断线重连宽限期） |
 | `-h, --help` | - | - | - | 打印命令行帮助信息与选项详情 |
 | `-V, --version` | - | - | - | 打印当前 TextCraft 版本号 (`3.0.0`) |
 
@@ -240,7 +247,7 @@ Scheme 主脚本需实现以下标准生命周期函数：
 | `(engine:on-input pid input-map)` | 接收按键/鼠标 | 处理角色位移与交互动作 |
 | `(engine:on-ui-action pid action-map)`| 接收 HUD 交互 | 处理点击背包、对话关闭、视口变更等 UI 交互 |
 | `(engine:on-command pid datum raw)` | 接收控制台指令 | 安全解析玩家聊天或游戏命令 |
-| `(engine:render-snapshot pid)` | 每帧推流前 | 必须返回 `(hash "screen" ansi-str "cols" w "rows" h "hud" hud-map)` |
+| `(engine:render-snapshot pid)` | 每帧推流前 | Scheme 权威快照生成与脏检测。未变脏返回 `#f`（跳过光栅化），变脏时返回 `(hash "screen" ansi-str "cols" cols "rows" rows "hud" hud-map)` |
 | `(engine:export-state)` | 存档/热重载前 | 将 `*world-state*` 导出为纯 JSON 兼容纯数据树 |
 | `(engine:import-state data)` | 读档/热重载后 | 恢复全局纯数据状态 |
 
@@ -250,7 +257,10 @@ Rust 宿主向 Scheme 运行环境注册了以下通用系统功能：
 - `(engine:send-message pid channel text)`：向指定玩家发送事件通知
 - `(engine:broadcast channel text)`：向全服广播事件通知
 - `(engine:log text)`：在服务端输出 tracing 日志
-- `(engine:random-int min max)`：生成范围内的安全伪随机整数
+- `(engine:random-int min max [seed])`：生成范围内的伪随机整数（支持可选种子实现确定性推演）
+- `(mcp:store-set [namespace] key val)`：写入专用 MCP 智能体存储黑板
+- `(mcp:store-get [namespace] key)`：读取专用 MCP 存储项（不存在返回 `#f`）
+- `(mcp:def-tool name desc schema proc)`：动态自举定义新 MCP 工具
 
 ---
 
@@ -271,7 +281,9 @@ textcraft/
   ├── docs/                          # 开发者文档
   │   └── develop/
   │       ├── agent_developer_guide.md
-  │       └── mcp_developer_guide.md
+  │       ├── mcp_developer_guide.md
+  │       ├── steel_scheme_reference.md
+  │       └── steel_scheme_best_practices.md
   └── README.md                      # 使用说明
 ```
 
