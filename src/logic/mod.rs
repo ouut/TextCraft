@@ -1147,10 +1147,10 @@ impl SchemeLogic {
         Ok(())
     }
 
-    /// Force immediate reload of all Scheme scripts (alias for `force_reload`).
+    /// Force immediate reload of all Scheme scripts (alias for `force_reload(false)`).
     #[inline]
     pub fn reload_scripts(&mut self) -> Result<(), String> {
-        self.force_reload()
+        self.force_reload(false)
     }
 
     /// Check if watched `.scm` script files have been modified and reload with state preservation.
