@@ -173,6 +173,7 @@ cargo run -- --port 8081 --mcp-port 8082 -w --log-level debug
 | `--host <ip>` | `host` | `String` | `0.0.0.0` | 绑定监听地址。`0.0.0.0` 允许本机与局域网设备同时访问 |
 | `--port <port>` | `port` | `u16` | `8081` | 监听 HTTP Web 资源与 WebSocket 网关服务端口 |
 | `--mcp-port <port>` | `mcp_port` | `Option<u16>` | `None` | 可选的 MCP (Model Context Protocol) HTTP JSON-RPC 2.0 监听端口（如 `8082`，详见 [`docs/develop/mcp_developer_guide.md`](docs/develop/mcp_developer_guide.md)） |
+| `--web-dir <path>` | `web_dir` | `Option<PathBuf>` | `None` | 自定义 Web 静态资源目录（覆盖内嵌资源；未指定时自动探测本地 `./web` 或程序同级目录，不存在则兜底使用编译期内嵌资源） |
 | `--scripts-dir <path>` | `scripts_dir` | `PathBuf` | `scripts` | Scheme 脚本所在目录（必须包含 `prelude.scm` 与 `main.scm`） |
 | `-w, --watch` | `watch` | `bool` | `false` | 开启 Scheme 脚本自动热重载监控（每 2 秒轮询一次，修改保存后无损状态自动重载；默认关闭零开销） |
 | `--log-level <level>` | `log_level` | `LogLevel` | `info` | 日志输出级别（枚举：`error`、`warn`、`info`、`debug`、`trace`；若显式设置 `RUST_LOG` 环境变量则优先遵循 `RUST_LOG`） |

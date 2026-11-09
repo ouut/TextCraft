@@ -129,6 +129,10 @@ pub struct ServerArgs {
     /// Optional HTTP port for Model Context Protocol (MCP) JSON-RPC 2.0 server (e.g. 8082)
     #[arg(long)]
     pub mcp_port: Option<u16>,
+
+    /// Custom directory for serving web client static assets (overrides embedded assets)
+    #[arg(long)]
+    pub web_dir: Option<PathBuf>,
 }
 
 type McpRequestMsg = (
@@ -251,9 +255,42 @@ impl TextCraftServer {
     /// Starts the server instance with parsed CLI arguments.
     pub async fn start(args: ServerArgs) -> Result<Self, Box<dyn std::error::Error>> {
         let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
-        let config = ServerConfig::new(addr)
-            .with_heartbeat_timeout_secs(args.heartbeat_timeout_secs)
-            .with_embedded_assets(&EMBEDDED_WEB_ASSETS);
+        let base_config = ServerConfig::new(addr).with_heartbeat_timeout_secs(args.heartbeat_timeout_secs);
+
+        // Resolve web static assets priority:
+        // 1. Explicit --web-dir if provided and exists
+        // 2. Local ./web directory if present in current working directory or adjacent to exe
+        // 3. Fallback to embedded static assets
+        let exe_dir_web = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("web")));
+        let config = if let Some(ref dir) = args.web_dir {
+            if dir.is_dir() {
+                tracing::info!(path = %dir.display(), "Using custom web assets directory from --web-dir");
+                base_config.with_static_dir(dir)
+            } else {
+                tracing::warn!(path = %dir.display(), "Specified --web-dir does not exist, falling back to auto-detection");
+                if PathBuf::from("web").is_dir() {
+                    tracing::info!("Detected local ./web directory, using external web assets");
+                    base_config.with_static_dir("web")
+                } else if let Some(ref exe_web) = exe_dir_web.filter(|p| p.is_dir()) {
+                    tracing::info!(path = %exe_web.display(), "Detected adjacent web directory, using external web assets");
+                    base_config.with_static_dir(exe_web)
+                } else {
+                    tracing::info!("Using embedded web assets (zero-dependency)");
+                    base_config.with_embedded_assets(&EMBEDDED_WEB_ASSETS)
+                }
+            }
+        } else if PathBuf::from("web").is_dir() {
+            tracing::info!("Detected local ./web directory, using external web assets");
+            base_config.with_static_dir("web")
+        } else if let Some(ref exe_web) = exe_dir_web.filter(|p| p.is_dir()) {
+            tracing::info!(path = %exe_web.display(), "Detected adjacent web directory, using external web assets");
+            base_config.with_static_dir(exe_web)
+        } else {
+            tracing::info!("Using embedded web assets (zero-dependency)");
+            base_config.with_embedded_assets(&EMBEDDED_WEB_ASSETS)
+        };
         let mut logic = SchemeLogic::new(args.scripts_dir, args.watch, args.save_file)?;
         logic.init()?;
 
