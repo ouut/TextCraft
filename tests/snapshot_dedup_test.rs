@@ -189,6 +189,7 @@ async fn test_snapshot_delivered_immediately_on_player_action() {
         shift: false,
         ctrl: false,
         alt: false,
+        action: Default::default(),
     });
     ws.send(Message::Text(DualCodec::encode_text(&key_cmd).unwrap()))
         .await
