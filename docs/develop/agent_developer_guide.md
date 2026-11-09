@@ -5,7 +5,9 @@
 > TextCraft 4.0 采用 **“Flecs ECS 权威底座 + 原生 ANSI 光栅化 + 密集数学算子 (Rust) + 纯 Scheme 动态业务逻辑 (Steel) + 极简 Web 终端底座 + 单进程 MCP AI 管道”** 架构：
 > - **4.0 核心逻辑与 FFI 接口开发**：关于 Flecs ECS 原语、数学密集算子（FOV/A*/Dijkstra/噪声/洞窟）、解剖学肢体、化学液体池、变异系统与生命周期钩子，请**直接参阅专门文档**：[**《Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南》 (`scheme_developer_guide.md`)**](scheme_developer_guide.md)；
 > - **定制前端 HUD 界面与交互**：只需在 `web/index.html` 中调用全局桥接对象 `window.TextCraft`，自由编写原生 HTML/CSS/JS，通过纯 JSON 字典与 Scheme 通信（详见本指南第三部分）；
-> - **使用 MCP 工具与 AI 实时协同开发**：通过 `--mcp-port 8082` 开启 HTTP JSON-RPC 2.0 MCP 接口，并使用 `ecs_inspect`、`ecs_query` 与 `ecs_modify` 实时透视实体，详见 [**《MCP 开发者与 AI 协同开发指南》 (`mcp_developer_guide.md`)**](mcp_developer_guide.md)。
+> - **使用 MCP 工具与 AI 实时协同开发**：通过 `--mcp-port 8082` 开启 HTTP JSON-RPC 2.0 MCP 接口，并使用 `ecs_inspect`、`ecs_query` 与 `ecs_modify` 实时透视实体，详见 [**《MCP 开发者与 AI 协同开发指南》 (`mcp_developer_guide.md`)**](mcp_developer_guide.md)；
+> - **查询 Steel 内置函数与标准库**：TextCraft 使用嵌入式 Steel Scheme 0.8.3 引擎，支持数百个原生数学、字符串、列表、哈希表、集合、文件与网络操作，详见 [**《Steel Scheme 0.8.3 内置标准库与核心函数参考手册》 (`steel_scheme_reference.md`)**](steel_scheme_reference.md)；
+> - **心法跃迁与编码实践**：想要消除括号心智负担、写出高内聚数据流代码，请参阅 [**《Steel Scheme 代码开发最佳实践：从入门到“快到起飞”》 (`steel_scheme_best_practices.md`)**](steel_scheme_best_practices.md)。
 
 ---
 

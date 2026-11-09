@@ -193,6 +193,7 @@ cargo run -- --port 8081 --mcp-port 8082 -w --log-level debug
 | `--host <ip>` | `host` | `String` | `0.0.0.0` | 绑定监听地址。`0.0.0.0` 允许本机与局域网设备同时访问 |
 | `--port <port>` | `port` | `u16` | `8081` | 监听 HTTP Web 资源与 WebSocket 网关服务端口 |
 | `--mcp-port <port>` | `mcp_port` | `Option<u16>` | `None` | 可选的 MCP (Model Context Protocol) HTTP JSON-RPC 2.0 监听端口（如 `8082`，详见 [`docs/develop/mcp_developer_guide.md`](docs/develop/mcp_developer_guide.md)） |
+| `--web-dir <path>` | `web_dir` | `Option<PathBuf>` | `None` | 自定义 Web 静态资源目录（覆盖内嵌资源；未指定时自动探测本地 `./web` 或程序同级目录，不存在则兜底使用编译期内嵌资源） |
 | `--scripts-dir <path>` | `scripts_dir` | `PathBuf` | `scripts` | Scheme 脚本所在目录（必须包含 `prelude.scm` 与 `main.scm`） |
 | `-w, --watch` | `watch` | `bool` | `false` | 开启 Scheme 脚本自动热重载监控（每 2 秒轮询一次，修改保存后无损状态自动重载；默认关闭零开销） |
 | `--log-level <level>` | `log_level` | `LogLevel` | `info` | 日志输出级别（枚举：`error`、`warn`、`info`、`debug`、`trace`；若显式设置 `RUST_LOG` 环境变量则优先遵循 `RUST_LOG`） |
@@ -200,6 +201,7 @@ cargo run -- --port 8081 --mcp-port 8082 -w --log-level debug
 | `--admin-token <token>` | `admin_token` | `String` | `admin` | 管理员认证 Token。在游戏控制台输入以 `!` 开头的指令进行 REPL 求值 |
 | `--save-file <path>` | `save_file` | `PathBuf` | `None` | 世界纯数据状态存档路径（原子保存与断点恢复；未指定则不落盘） |
 | `--autosave-sec <sec>` | `autosave_sec` | `u64` | `30` | 自动定时存档周期（单位：秒；设为 `0` 时禁用自动存档） |
+| `--heartbeat-timeout-secs <sec>` | `heartbeat_timeout_secs` | `u64` | `30` | 活跃客户端心跳超时时间（单位：秒；超时后进入断线宽限期；默认 30 秒） |
 | `--snapshot-heartbeat-ms <ms>` | `snapshot_heartbeat_ms` | `u64` | `1000` | 快照保活心跳周期（毫秒；静止状态去重跳过，达到周期强制推流保活；设为 `0` 禁用去重） |
 | `-h, --help` | - | - | - | 打印命令行帮助信息与选项详情 |
 | `-V, --version` | - | - | - | 打印当前 TextCraft 版本号 (`3.0.0`) |

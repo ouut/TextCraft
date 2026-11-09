@@ -367,6 +367,17 @@
       }
       TextCraft.resolveClientIdentity = resolveClientIdentity;
 
+      function sendPing() {
+        sendRaw({ Ping: { client_time_ms: Date.now() } });
+      }
+
+      function startHeartbeat() {
+        if (pingInterval) clearInterval(pingInterval);
+        pingInterval = setInterval(() => {
+          sendPing();
+        }, 3000);
+      }
+
       function connectWebSocket() {
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
@@ -389,10 +400,8 @@
           reconnectAttempts = 0;
           connTextEl.textContent = '已连接';
           sendRaw({ Auth: { token: token, client_version: '3.0.0' } });
-          if (pingInterval) clearInterval(pingInterval);
-          pingInterval = setInterval(() => {
-            sendRaw({ Ping: { client_time_ms: Date.now() } });
-          }, 3000);
+          sendPing();
+          startHeartbeat();
         };
 
         ws.onmessage = (ev) => {
@@ -437,6 +446,19 @@
         const delay = Math.min(1000 * Math.pow(1.3, reconnectAttempts - 1), 4000);
         reconnectTimer = setTimeout(() => { reconnectTimer = null; connectWebSocket(); }, delay);
       }
+
+      function onVisibilityOrFocusChange() {
+        if (document.hidden) return;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          sendPing();
+          startHeartbeat();
+        } else if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          connectWebSocket();
+        }
+      }
+
+      document.addEventListener('visibilitychange', onVisibilityOrFocusChange);
+      window.addEventListener('focus', onVisibilityOrFocusChange);
 
       document.getElementById('conn-btn').addEventListener('click', () => {
         if (!ws || ws.readyState !== WebSocket.OPEN) connectWebSocket();
