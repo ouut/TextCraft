@@ -890,7 +890,7 @@ impl TextCraftServer {
                         },
                         "action": {
                             "type": "string",
-                            "description": "UI action name when type='ui' (e.g. 'use_item', 'buy_potion', 'close_dialog')"
+                            "description": "Key action ('down' | 'up') when type='key' (default: 'down'), or UI action name when type='ui' (e.g. 'use_item', 'buy_potion', 'close_dialog')"
                         },
                         "payload": {
                             "type": "object",
@@ -955,17 +955,36 @@ impl TextCraftServer {
                             "type": "number",
                             "description": "Delta time per step in seconds (default: 0.016)"
                         },
+                        "seed": {
+                            "type": "integer",
+                            "description": "Optional deterministic PRNG seed to set before stepping"
+                        },
+                        "state_projection": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional list of dot-separated paths to project and return from world state instead of full state (e.g. ['players.1.x', 'players.1.gold'])"
+                        },
+                        "diff_path_prefix": {
+                            "type": "string",
+                            "description": "Optional dot-separated key path prefix to scope the diff comparison (e.g. 'players.1')"
+                        },
+                        "diff_exclude_keys": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional list of keys to exclude from state diff comparison (defaults to ['chunks'])"
+                        },
                         "inputs": {
                             "type": "array",
-                            "description": "Optional player inputs to inject during stepping. Each item: { player_id, input, step? }",
+                            "description": "Optional player inputs to inject during stepping. Each item: { player_id, input, step?, hold_ticks? }",
                             "items": {
                                 "type": "object",
                                 "properties": {
                                     "player_id": { "type": "integer" },
                                     "step": { "type": "integer", "description": "0-based step index at which to inject this input (default: 0)" },
+                                    "hold_ticks": { "type": "integer", "description": "Optional number of ticks to hold this key down. Automatically injects 'action': 'down' at 'step', and 'action': 'up' at 'step + hold_ticks'." },
                                     "type": { "type": "string", "enum": ["key", "ui", "mouse", "cmd"] },
                                     "code": { "type": "string" },
-                                    "action": { "type": "string" },
+                                    "action": { "type": "string", "description": "Key action ('down' | 'up') when type='key', or UI action name when type='ui'" },
                                     "payload": { "type": "object" },
                                     "command": { "type": "string" },
                                     "x": { "type": "integer" },
@@ -1002,13 +1021,37 @@ impl TextCraftServer {
                         "new_state": {
                             "type": "object",
                             "description": "Target state to compare to. If omitted, uses current world state."
+                        },
+                        "path_prefix": {
+                            "type": "string",
+                            "description": "Optional dot-separated key path prefix to scope the diff comparison to a subtree (e.g. 'players.1')"
+                        },
+                        "exclude_keys": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional list of keys or key paths to exclude from diff comparison (e.g. ['chunks'])"
                         }
                     }
                 }
             }),
             serde_json::json!({
+                "name": "query_state",
+                "description": "Query and project specific parts of current exported world state by dot-separated path masks (e.g. ['players.1.x', 'players.1.hp', 'monsters.boss_1.hp']) to reduce token overhead.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "List of dot-separated key paths to extract (e.g. ['players.1.x', 'players.1.gold'])"
+                        }
+                    },
+                    "required": ["paths"]
+                }
+            }),
+            serde_json::json!({
                 "name": "eval_assertion",
-                "description": "Evaluate a Scheme assertion expression under watchdog protection. Returns passed: true if non-#f, or passed: false with error details if #f or exception.",
+                "description": "Evaluate Scheme assertion expressions under watchdog protection. Supports single expression ('code' or 'expr') or batch assertions ('exprs'). Returns structured assertion report with pass/fail and rich diff details.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1016,12 +1059,20 @@ impl TextCraftServer {
                             "type": "string",
                             "description": "Scheme assertion expression to evaluate, e.g. '(= (map-get (get-player 1) \"x\" 0) 5)'"
                         },
+                        "expr": {
+                            "type": "string",
+                            "description": "Alias for code: single Scheme assertion expression to evaluate"
+                        },
+                        "exprs": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Batch of Scheme assertion expressions to evaluate together in one request"
+                        },
                         "timeout_ms": {
                             "type": "integer",
-                            "description": "Watchdog timeout in milliseconds (default: 1000)"
+                            "description": "Watchdog timeout in milliseconds per assertion (default: 1000)"
                         }
-                    },
-                    "required": ["code"]
+                    }
                 }
             }),
             serde_json::json!({
@@ -1293,25 +1344,33 @@ impl TextCraftServer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("key");
                 let input = match input_type {
-                    "key" => PlayerInput::Key {
-                        code: arguments
-                            .get("code")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        shift: arguments
-                            .get("shift")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                        ctrl: arguments
-                            .get("ctrl")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                        alt: arguments
-                            .get("alt")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                    },
+                    "key" => {
+                        let action_str = arguments.get("action").and_then(|v| v.as_str()).unwrap_or("down");
+                        let action = match action_str {
+                            "up" => crate::types::KeyAction::Up,
+                            _ => crate::types::KeyAction::Down,
+                        };
+                        PlayerInput::Key {
+                            code: arguments
+                                .get("code")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            action,
+                            shift: arguments
+                                .get("shift")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            ctrl: arguments
+                                .get("ctrl")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            alt: arguments
+                                .get("alt")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                        }
+                    }
                     "ui" => PlayerInput::UIAction {
                         action: arguments
                             .get("action")
@@ -1389,6 +1448,10 @@ impl TextCraftServer {
                 let snap_pid = arguments.get("snapshot_player_id").and_then(|v| v.as_u64()).unwrap_or(1);
                 let include_diff = arguments.get("include_state_diff").and_then(|v| v.as_bool()).unwrap_or(false);
 
+                if let Some(seed_val) = arguments.get("seed").and_then(|v| v.as_i64()) {
+                    self.logic.set_random_seed(Some(seed_val as u64));
+                }
+
                 let initial_state = if include_diff {
                     self.logic.export_state().ok()
                 } else {
@@ -1401,44 +1464,152 @@ impl TextCraftServer {
                     .and_then(|v| v.as_array())
                     .unwrap_or(&empty_vec);
 
+                enum InjectedAction {
+                    Cmd(String),
+                    Key {
+                        code: String,
+                        action: crate::types::KeyAction,
+                        shift: bool,
+                        ctrl: bool,
+                        alt: bool,
+                    },
+                    UI {
+                        action: String,
+                        payload: serde_json::Value,
+                    },
+                    Mouse {
+                        x: i32,
+                        y: i32,
+                        button: String,
+                    },
+                }
+
+                struct ScheduledItem {
+                    step: u64,
+                    player_id: u64,
+                    action: InjectedAction,
+                }
+
+                let mut scheduled: Vec<ScheduledItem> = Vec::new();
+                for item in input_items {
+                    let pid = item.get("player_id").and_then(|v| v.as_u64()).unwrap_or(1);
+                    let step = item.get("step").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let input_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("key");
+                    match input_type {
+                        "cmd" => {
+                            if let Some(cmd_str) = item.get("command").and_then(|v| v.as_str()) {
+                                scheduled.push(ScheduledItem {
+                                    step,
+                                    player_id: pid,
+                                    action: InjectedAction::Cmd(cmd_str.to_string()),
+                                });
+                            }
+                        }
+                        "key" => {
+                            let code = item.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let shift = item.get("shift").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let ctrl = item.get("ctrl").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let alt = item.get("alt").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let hold_ticks = item.get("hold_ticks").and_then(|v| v.as_u64());
+
+                            if let Some(n) = hold_ticks {
+                                scheduled.push(ScheduledItem {
+                                    step,
+                                    player_id: pid,
+                                    action: InjectedAction::Key {
+                                        code: code.clone(),
+                                        action: crate::types::KeyAction::Down,
+                                        shift,
+                                        ctrl,
+                                        alt,
+                                    },
+                                });
+                                scheduled.push(ScheduledItem {
+                                    step: step + n,
+                                    player_id: pid,
+                                    action: InjectedAction::Key {
+                                        code,
+                                        action: crate::types::KeyAction::Up,
+                                        shift,
+                                        ctrl,
+                                        alt,
+                                    },
+                                });
+                            } else {
+                                let action_str = item.get("action").and_then(|v| v.as_str()).unwrap_or("down");
+                                let action = match action_str {
+                                    "up" => crate::types::KeyAction::Up,
+                                    _ => crate::types::KeyAction::Down,
+                                };
+                                scheduled.push(ScheduledItem {
+                                    step,
+                                    player_id: pid,
+                                    action: InjectedAction::Key {
+                                        code,
+                                        action,
+                                        shift,
+                                        ctrl,
+                                        alt,
+                                    },
+                                });
+                            }
+                        }
+                        "ui" => {
+                            let action = item.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let payload = item.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                            scheduled.push(ScheduledItem {
+                                step,
+                                player_id: pid,
+                                action: InjectedAction::UI { action, payload },
+                            });
+                        }
+                        "mouse" => {
+                            let x = item.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                            let y = item.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                            let button = item.get("button").and_then(|v| v.as_str()).unwrap_or("left").to_string();
+                            scheduled.push(ScheduledItem {
+                                step,
+                                player_id: pid,
+                                action: InjectedAction::Mouse { x, y, button },
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
                 for step_idx in 0..steps {
                     // Inject inputs scheduled for this step
-                    for item in input_items {
-                        let target_step = item.get("step").and_then(|v| v.as_u64()).unwrap_or(0);
-                        if target_step == step_idx {
-                            let pid = item.get("player_id").and_then(|v| v.as_u64()).unwrap_or(1);
-                            let input_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("key");
-                            match input_type {
-                                "cmd" => {
-                                    if let Some(cmd_str) = item.get("command").and_then(|v| v.as_str()) {
-                                        let trimmed = cmd_str.trim();
-                                        if trimmed.starts_with('!') {
-                                            let code = trimmed.strip_prefix('!').unwrap_or(trimmed).trim();
-                                            let _ = self.logic.eval_repl(code);
-                                        } else {
-                                            let _ = self.logic.on_command(pid, trimmed);
-                                        }
+                    for item in &scheduled {
+                        if item.step == step_idx {
+                            match &item.action {
+                                InjectedAction::Cmd(cmd_str) => {
+                                    let trimmed = cmd_str.trim();
+                                    if trimmed.starts_with('!') {
+                                        let code = trimmed.strip_prefix('!').unwrap_or(trimmed).trim();
+                                        let _ = self.logic.eval_repl(code);
+                                    } else {
+                                        let _ = self.logic.on_command(item.player_id, trimmed);
                                     }
                                 }
-                                "key" => {
-                                    let code = item.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                    let shift = item.get("shift").and_then(|v| v.as_bool()).unwrap_or(false);
-                                    let ctrl = item.get("ctrl").and_then(|v| v.as_bool()).unwrap_or(false);
-                                    let alt = item.get("alt").and_then(|v| v.as_bool()).unwrap_or(false);
-                                    let _ = self.logic.on_input(pid, &PlayerInput::Key { code, shift, ctrl, alt });
+                                InjectedAction::Key { code, action, shift, ctrl, alt } => {
+                                    let _ = self.logic.on_input(item.player_id, &PlayerInput::Key {
+                                        code: code.clone(),
+                                        action: *action,
+                                        shift: *shift,
+                                        ctrl: *ctrl,
+                                        alt: *alt,
+                                    });
                                 }
-                                "ui" => {
-                                    let action = item.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                    let payload = item.get("payload").cloned().unwrap_or(serde_json::Value::Null);
-                                    let _ = self.logic.on_ui_action(pid, &action, &payload);
+                                InjectedAction::UI { action, payload } => {
+                                    let _ = self.logic.on_ui_action(item.player_id, action, payload);
                                 }
-                                "mouse" => {
-                                    let x = item.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                                    let y = item.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                                    let button = item.get("button").and_then(|v| v.as_str()).unwrap_or("left").to_string();
-                                    let _ = self.logic.on_input(pid, &PlayerInput::Mouse { x, y, button });
+                                InjectedAction::Mouse { x, y, button } => {
+                                    let _ = self.logic.on_input(item.player_id, &PlayerInput::Mouse {
+                                        x: *x,
+                                        y: *y,
+                                        button: button.clone(),
+                                    });
                                 }
-                                _ => {}
                             }
                         }
                     }
@@ -1483,9 +1654,34 @@ impl TextCraftServer {
                     }
                 }
 
+                if let Some(proj_arr) = arguments.get("state_projection").and_then(|v| v.as_array()) {
+                    let paths: Vec<String> = proj_arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    if let Ok(st) = self.logic.export_state() {
+                        let proj_val = crate::logic::project_json_value(&st, &paths);
+                        out["projected_state"] = proj_val.clone();
+                        out["state_projection"] = proj_val;
+                    }
+                }
+
                 if include_diff {
+                    let diff_path_prefix = arguments.get("diff_path_prefix").and_then(|v| v.as_str());
+                    let diff_exclude_keys: Vec<String> = if let Some(arr) = arguments.get("diff_exclude_keys").and_then(|v| v.as_array()) {
+                        arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+                    } else {
+                        vec!["chunks".to_string()]
+                    };
+                    let diff_exclude_refs: Vec<&str> = diff_exclude_keys.iter().map(|s| s.as_str()).collect();
+
                     if let (Some(old_st), Ok(new_st)) = (initial_state, self.logic.export_state()) {
-                        out["state_diff"] = crate::logic::compute_json_diff(&old_st, &new_st);
+                        out["state_diff"] = crate::logic::compute_json_diff_scoped(
+                            &old_st,
+                            &new_st,
+                            diff_path_prefix,
+                            Some(&diff_exclude_refs),
+                        );
                     }
                 }
 
@@ -1498,29 +1694,71 @@ impl TextCraftServer {
                 };
                 let old_state = arguments.get("old_state").unwrap_or(&current_state);
                 let new_state = arguments.get("new_state").unwrap_or(&current_state);
-                let diff = crate::logic::compute_json_diff(old_state, new_state);
+                let path_prefix = arguments.get("path_prefix").and_then(|v| v.as_str());
+                let exclude_keys_vec: Option<Vec<&str>> = arguments
+                    .get("exclude_keys")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect());
+                let diff = crate::logic::compute_json_diff_scoped(
+                    old_state,
+                    new_state,
+                    path_prefix,
+                    exclude_keys_vec.as_deref(),
+                );
                 (serde_json::to_string_pretty(&diff).unwrap_or_else(|_| diff.to_string()), false)
             }
-            "eval_assertion" => {
-                let Some(code) = arguments.get("code").and_then(|v| v.as_str()) else {
-                    return ("Missing required string parameter 'code'".to_string(), true);
+            "query_state" => {
+                let Some(paths_arr) = arguments.get("paths").and_then(|v| v.as_array()) else {
+                    return ("Missing required parameter 'paths' (array of strings)".to_string(), true);
                 };
+                let paths: Vec<String> = paths_arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                let current_state = match self.logic.export_state() {
+                    Ok(st) => st,
+                    Err(e) => return (format!("Failed to export world state: {}", e), true),
+                };
+                let projected = crate::logic::project_json_value(&current_state, &paths);
+                (serde_json::to_string_pretty(&projected).unwrap_or_else(|_| projected.to_string()), false)
+            }
+            "eval_assertion" => {
                 let timeout_ms = arguments.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(1000);
-                match self.logic.eval_assertion(code, timeout_ms) {
-                    Ok(res_val) => {
-                        let out = serde_json::json!({
-                            "passed": true,
-                            "result": res_val,
-                        });
-                        (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
+                if let Some(exprs_val) = arguments.get("exprs").and_then(|v| v.as_array()) {
+                    let exprs: Vec<String> = exprs_val
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    let summary = self.logic.eval_assertions(&exprs, timeout_ms);
+                    (serde_json::to_string_pretty(&summary).unwrap_or_else(|_| summary.to_string()), false)
+                } else if let Some(code) = arguments.get("code").or_else(|| arguments.get("expr")).and_then(|v| v.as_str()) {
+                    match self.logic.eval_assertion(code, timeout_ms) {
+                        Ok(res_val) => {
+                            let is_failure = res_val
+                                .as_object()
+                                .and_then(|obj| obj.get("passed"))
+                                .and_then(|p| p.as_bool())
+                                == Some(false);
+                            let out = if is_failure {
+                                res_val
+                            } else {
+                                serde_json::json!({
+                                    "passed": true,
+                                    "result": res_val,
+                                })
+                            };
+                            (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
+                        }
+                        Err(err) => {
+                            let out = serde_json::json!({
+                                "passed": false,
+                                "error": err,
+                            });
+                            (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
+                        }
                     }
-                    Err(err) => {
-                        let out = serde_json::json!({
-                            "passed": false,
-                            "error": err,
-                        });
-                        (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
-                    }
+                } else {
+                    ("Missing required parameter: provide 'code'/'expr' string or 'exprs' array".to_string(), true)
                 }
             }
             "mcp_store_set" => {

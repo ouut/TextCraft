@@ -10,6 +10,49 @@
 (define (bump-visual-version!)
   (set! *visual-version* (+ *visual-version* 1)))
 
+(define *current-tick* 0)
+(define (engine:set-current-tick! tick)
+  (set! *current-tick* tick))
+
+;; ----------------------------------------------------------------------------
+;; Deterministic Pseudo-Random Number Generation (PRNG) Wrappers
+;; ----------------------------------------------------------------------------
+
+(define (engine:random-int lo hi . rest)
+  (engine:raw-random-int lo hi (if (null? rest) #f (car rest))))
+
+(define (random:seed! n)
+  (engine:raw-random-int 0 0 n))
+
+(define (random:reset!)
+  (engine:raw-random-int 0 0 #f))
+
+;; ----------------------------------------------------------------------------
+;; Rich Assertion Library
+;; ----------------------------------------------------------------------------
+
+(define (assert:equal actual expected . rest)
+  (let* ((label (if (null? rest) #f (car rest)))
+         (passed (equal? actual expected))
+         (res (if passed
+                  (hash "passed" #t "actual" actual "expected" expected)
+                  (hash "passed" #f "actual" actual "expected" expected
+                        "error" (string-append "Expected " (to-string expected) ", got " (to-string actual))))))
+    (if label
+        (hash-insert res "label" label)
+        res)))
+
+(define (assert:true condition . rest)
+  (let* ((label (if (null? rest) #f (car rest)))
+         (passed (if condition #t #f))
+         (res (if passed
+                  (hash "passed" #t "actual" condition "expected" #t)
+                  (hash "passed" #f "actual" condition "expected" #t
+                        "error" (string-append "Expected #t, got " (to-string condition))))))
+    (if label
+        (hash-insert res "label" label)
+        res)))
+
 ;; ----------------------------------------------------------------------------
 ;; Generic Helpers
 ;; ----------------------------------------------------------------------------
@@ -226,8 +269,9 @@
                     (hash "id" "potion" "name" "生命药水" "icon" "🧪" "count" 3))
       "dialog" #f
       "logs" (list
-               (hash "channel" "system" "text" "欢迎进入 TextCraft 3.0! (Scheme 驱动引擎)"))
-      "last_action_tick" 0)))
+               (hash "channel" "system" "text" "欢迎进入 TextCraft 3.0! (Scheme 驱动引擎)" "tick" 0))
+      "last_action_tick" 0
+      "pressed_keys" (hash))))
 
 (define (get-player player-id)
   (let* ((pid-key (to-string player-id))
@@ -276,7 +320,7 @@
 (define (engine:on-player-disconnect pid)
   (let ((p (get-player pid)))
     (if p
-        (set-player pid (hash-insert p "online" #f))
+        (set-player pid (hash-insert (hash-insert p "online" #f) "pressed_keys" (hash)))
         #f))
   'ok)
 
@@ -294,13 +338,61 @@
 (define (player:add-log player-id channel text)
   (let* ((p (ensure-player player-id))
          (old-logs (map-get p "logs" '()))
-         (new-log (hash "channel" channel "text" text))
+         (new-log (hash "channel" channel "text" text "tick" *current-tick*))
          (all-logs (append old-logs (list new-log)))
          (trimmed (if (> (length all-logs) 30)
                       (list-tail all-logs (- (length all-logs) 30))
                       all-logs))
          (p2 (hash-insert p "logs" trimmed)))
     (set-player player-id p2)))
+
+;; ----------------------------------------------------------------------------
+;; Player Keyboard State Management & Continuous Hold Tracking
+;; ----------------------------------------------------------------------------
+
+(define (player:handle-key-action! pid code action)
+  (let* ((p (ensure-player pid))
+         (pressed-keys (map-get p "pressed_keys" (hash)))
+         (code-str (if (string? code) code (to-string code)))
+         (action-str (if (string? action) action (to-string action))))
+    (if (or (string=? code-str "") (string=? code-str "false") (string=? code-str "#f"))
+        #f
+        (cond
+          ((or (equal? action-str "down") (equal? action-str "key_down") (equal? action-str "key"))
+           (let* ((cur-press-tick (map-get pressed-keys code-str #f))
+                  (new-pressed (if cur-press-tick
+                                   pressed-keys
+                                   (hash-insert pressed-keys code-str *current-tick*)))
+                  (p2 (hash-insert p "pressed_keys" new-pressed)))
+             (set-player pid p2)
+             #t))
+          ((or (equal? action-str "up") (equal? action-str "key_up"))
+           (let* ((new-pressed (hash-remove pressed-keys code-str))
+                  (p2 (hash-insert p "pressed_keys" new-pressed)))
+             (set-player pid p2)
+             #t))
+          (else #f)))))
+
+(define (player:key-pressed? pid code)
+  (let* ((p (get-player pid)))
+    (if p
+        (let* ((pressed-keys (map-get p "pressed_keys" (hash)))
+               (code-str (if (string? code) code (to-string code))))
+          (if (hash-contains? pressed-keys code-str)
+              #t
+              #f))
+        #f)))
+
+(define (player:key-hold-ticks pid code)
+  (let* ((p (get-player pid)))
+    (if p
+        (let* ((pressed-keys (map-get p "pressed_keys" (hash)))
+               (code-str (if (string? code) code (to-string code)))
+               (start-tick (map-get pressed-keys code-str #f)))
+          (if (number? start-tick)
+              (max 0 (- *current-tick* start-tick))
+              0))
+        0)))
 
 ;; ----------------------------------------------------------------------------
 ;; Read-Only HUD Builder

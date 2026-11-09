@@ -419,6 +419,7 @@ async fn test_checkpoint_and_time_travel_rollback() {
                 shift: false,
                 ctrl: false,
                 alt: false,
+                action: Default::default(),
             },
         );
         let t = server.handle.increment_server_tick();
@@ -474,6 +475,7 @@ async fn test_checkpoint_and_time_travel_rollback() {
                 shift: false,
                 ctrl: false,
                 alt: false,
+                action: Default::default(),
             },
         );
         let t = server.handle.increment_server_tick();
@@ -745,6 +747,7 @@ async fn test_reload_scripts_clean_and_lossless() {
                 shift: false,
                 ctrl: false,
                 alt: false,
+                action: Default::default(),
             },
         );
         let t = server.handle.increment_server_tick();
@@ -805,6 +808,7 @@ async fn test_reload_scripts_clean_and_lossless() {
                 shift: false,
                 ctrl: false,
                 alt: false,
+                action: Default::default(),
             },
         );
         let t = server.handle.increment_server_tick();

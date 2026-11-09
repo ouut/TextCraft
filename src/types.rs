@@ -1,11 +1,21 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyAction {
+    #[default]
+    Down,
+    Up,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PlayerInput {
     #[serde(rename = "key")]
     Key {
         code: String,
+        #[serde(default)]
+        action: KeyAction,
         #[serde(default)]
         shift: bool,
         #[serde(default)]
@@ -98,11 +108,13 @@ mod tests {
         match input {
             PlayerInput::Key {
                 code,
+                action,
                 shift,
                 ctrl,
                 alt,
             } => {
                 assert_eq!(code, "KeyW");
+                assert_eq!(action, KeyAction::Down);
                 assert!(!shift);
                 assert!(!ctrl);
                 assert!(!alt);
@@ -112,6 +124,7 @@ mod tests {
 
         let serialized = serde_json::to_string(&PlayerInput::Key {
             code: "KeyS".to_string(),
+            action: KeyAction::Up,
             shift: true,
             ctrl: false,
             alt: false,
@@ -119,6 +132,7 @@ mod tests {
         .unwrap();
         assert!(serialized.contains(r#""type":"key""#));
         assert!(serialized.contains(r#""code":"KeyS""#));
+        assert!(serialized.contains(r#""action":"up""#));
         assert!(serialized.contains(r#""shift":true"#));
     }
 

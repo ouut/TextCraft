@@ -94,7 +94,7 @@ curl -s -X POST http://127.0.0.1:8082/mcp \
 
 ## 三、 宿主核心桥接工具：直接复用游戏命令与输入管线
 
-Rust 宿主层内置了 **15 个永不失效的核心宿主工具**（即使 `.scm` 脚本被改坏，AI 依然可以通过它们修复并重载脚本，或执行单步无头推演与专用 MCP 存储黑板存取）：
+Rust 宿主层内置了 **16 个永不失效的核心宿主工具**（即使 `.scm` 脚本被改坏，AI 依然可以通过它们修复并重载脚本，或执行单步无头推演、状态按需投影与专用 MCP 存储黑板存取）：
 
 ### 1. `game_command` —— 复用游戏底部命令输入框与 `!` 管理员 REPL
 直接复用游戏内命令输入管线，支持两种模式：
@@ -121,14 +121,15 @@ Rust 宿主层内置了 **15 个永不失效的核心宿主工具**（即使 `.s
 
 ### 2. `player_input` —— 模拟玩家键盘移动、UI 点击与鼠标交互
 直接复用 `process_player_input(player_id, input)`，模拟玩家操作并返回执行后的纯文本 `ascii_screen` 与 `hud`：
-- **模拟按键移动/交互 (`type: "key"`)**：
+- **模拟按键移动/交互 (`type: "key"`)**：支持 `action: "down" | "up"`（缺省为 `"down"`），以及 `shift`、`ctrl`、`alt` 修饰键：
   ```json
   {
     "name": "player_input",
     "arguments": {
       "player_id": 1,
       "type": "key",
-      "code": "KeyD"
+      "code": "KeyD",
+      "action": "down"
     }
   }
   ```
@@ -176,42 +177,101 @@ Rust 宿主层内置了 **15 个永不失效的核心宿主工具**（即使 `.s
 - `pause_clock`: 将主物理时钟暂停。世界 `tick(dt)` 推进立即停止，但 WebSocket 网络消息收发、心跳与 MCP 请求正常保活，方便 AI 介入冻结现场并执行精确诊断。
 - `resume_clock`: 恢复物理时钟定时驱动。
 
-### 5. `step_simulation` —— 虚拟时钟多步推演与操作序列注入
-支持以任意步长 `dt` 单步或连续推演指定步数 `steps`，并在特定步数安全注入操作序列：
+### 5. `step_simulation` —— 虚拟时钟多步推演、确定性种子与输入注入
+支持以任意步长 `dt` 单步或连续推演指定步数 `steps`，支持确定性伪随机种子 `seed`，支持按键长按持续时间 `hold_ticks`，以及状态投影和范围差分：
 ```json
 {
   "name": "step_simulation",
   "arguments": {
-    "steps": 1,
+    "steps": 3,
     "dt": 0.016,
+    "seed": 12345,
     "inputs": [
       {
         "step": 0,
         "player_id": 1,
         "type": "key",
-        "code": "KeyD"
+        "code": "KeyD",
+        "action": "down"
       }
     ],
+    "hold_ticks": 3,
+    "state_projection": ["players.1.x", "players.1.hp"],
     "include_snapshot": true,
     "snapshot_player_id": 1,
-    "include_state_diff": true
+    "include_state_diff": true,
+    "diff_path_prefix": "players.1",
+    "diff_exclude_keys": ["chunks"]
   }
 }
 ```
-返回包含 `steps_executed`、`final_tick`、`duration_ms`，以及可选的 ANSI 视口快照和状态微秒级 Diff。
+- `seed`: 可选 64 位整型种子，推演开始前配置确定性 PRNG，相同状态 + 相同种子 + 相同按键 = 100% 确定性时空复现。
+- `hold_ticks`: 可选长按帧数，在执行指定步数期间自动维持按键按压并在结束时释放，解锁即时物理跳跃与连续移动。
+- `state_projection`: 可选路径投影列表（如 `["players.1.x", "tick_count"]`），从世界状态按需投影，避免返回巨型全量状态。
+- `diff_exclude_keys`: 增量差分排除键（**缺省默认排除 `["chunks"]`**），屏蔽数十万字节不变瓦片噪声。
 
-### 6. `get_state_diff` —— 轻量级微秒级状态差分比较
-对比前后两个 JSON 状态树或当前内存世界状态，以扁平化路径输出：
+### 6. `get_state_diff` —— 轻量级微秒级状态差分比较与路径范围过滤
+对比前后两个 JSON 状态树或当前内存世界状态，支持指定前缀路径和排除键：
+```json
+{
+  "name": "get_state_diff",
+  "arguments": {
+    "path_prefix": "players.1",
+    "exclude_keys": ["chunks"]
+  }
+}
+```
+以扁平化路径输出：
 - `changed`: 如 `"players.1.x": { "old": 5, "new": 6 }`
 - `added`: 如 `"players.2": { ... }`
 - `removed`: 如 `"score": 0`
-避免大模型处理全量巨型状态，极度节省 Context Token。
 
-### 7. `eval_assertion` —— 游戏断言执行器 (TDD 单元测试)
-在带有看门狗保护的 Scheme 沙箱中求值断言表达式：
-- 若表达式求值为非 `#f`，返回 `{"passed": true, "result": ...}`；
-- 若表达式求值为 `#f` 或发生 Scheme 异常，返回 `{"passed": false, "error": "..."}`。
-使 Agent 具备开箱即用的测试驱动开发（TDD）闭环能力。
+### 7. `query_state` —— 状态按需投影与字段掩码 (Field Masking)
+按需抓取指定的点分隔路径字段，将数十 KB 甚至几百 KB 的巨型世界状态树压缩为仅含核心关注字段的微型 JSON：
+```json
+{
+  "name": "query_state",
+  "arguments": {
+    "paths": ["tick_count", "players.1.x", "players.1.hp", "monsters"]
+  }
+}
+```
+返回仅包含请求路径的树状 JSON 对象，极大节省大模型上下文 Token。
+
+### 8. `eval_assertion` —— 批量断言与富差值对比 (TDD 单元测试套件)
+在带有看门狗保护的 Scheme 沙箱中求值单个或批量断言表达式，支持富差值诊断：
+- **单表达式模式**：支持 `expr` 或 `code` 字符串参数。
+- **批量模式 (`exprs: string[]`)**：
+  ```json
+  {
+    "name": "eval_assertion",
+    "arguments": {
+      "exprs": [
+        "(= (+ 2 3) 5)",
+        "(assert:equal (get-gold 1) 20)",
+        "(assert:true (= (get-hp 1) 100))"
+      ]
+    }
+  }
+  ```
+  返回结构化聚合测试报告：
+  ```json
+  {
+    "all_passed": false,
+    "total": 3,
+    "passed": 2,
+    "failed": 1,
+    "results": [ ... ],
+    "failures": [
+      {
+        "expr": "(assert:equal (get-gold 1) 20)",
+        "expected": 20,
+        "actual": 15
+      }
+    ]
+  }
+  ```
+  配合 Scheme 内置原语 `(assert:equal actual expected)` 与 `(assert:true cond)`，Agent 即可单次请求执行完整测试套件并获取精准预期差值。
 
 ### 8. `mcp_store_set` —— 写入专用 MCP 存储 / 智能体黑板
 在 Rust 宿主专用内存存储（Blackboard）中存储或更新任意 JSON 数据，完全不污染游戏脚本的业务状态或正常游戏存档：

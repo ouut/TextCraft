@@ -3,7 +3,7 @@ pub mod runtime;
 pub mod types;
 
 pub use clap;
-pub use logic::{compute_json_diff, OutboundMessage, SchemeLogic};
+pub use logic::{compute_json_diff, compute_json_diff_scoped, OutboundMessage, SchemeLogic};
 pub use runtime::{
     resolve_namespace_and_key, run_server, strip_ansi_codes, LogLevel, McpStorage, ServerArgs,
     ServerHandleExt, TextCraftServer, EMBEDDED_WEB_ASSETS,
@@ -59,6 +59,7 @@ mod tests {
             shift: false,
             ctrl: false,
             alt: false,
+            action: Default::default(),
         };
         logic.on_input(1, &key_input).expect("Key input failed");
 

@@ -7,16 +7,16 @@
 
 ## 优化任务总览与优先级矩阵
 
-| 序号 | 核心问题 | 影响维度 | 优先级 | 预期收益 |
+| 序号 | 核心问题 | 影响维度 | 状态 / 落地版本 | 预期收益 |
 | :---: | :--- | :--- | :---: | :--- |
-| **1** | **可控随机种子与确定性仿真 (Deterministic PRNG & Seed)** | 稳定性 / 可复现性 | **P0** | 彻底消除测试偶发抖动（Flaky Tests），保证 Bug 100% 确定性单步复现 |
-| **2** | **批量断言与富差值反馈 (Batch Assertions & Rich Diff)** | 交互效率 / Token | **P0** | 一次 MCP 请求执行全量测试套件，给出 `expected vs actual` 语义差值 |
-| **3** | **状态按需投影与字段掩码 (State Projection / Mask)** | Token 上下文经济学 | **P0** | 避免百 KB 全量状态撑爆大模型 Context Window，按需抓取关键字段 |
-| **4** | **时序事件流与全局遥测 (Temporal Event Telemetry)** | 观测精度 / 调试 | **P1** | 推演时输出精确到帧（Step ID）的结构化事件，覆盖全局环境与怪兽行为 |
-| **5** | **状态增量路径过滤 (State Diff Path Scoping)** | 比对性能 / 噪声消除 | **P1** | 排除数十万字节的不变瓦片（`chunks`），只聚焦特定实体差异 |
-| **6** | **运行期性能剖析与热点打点 (Performance Profiler)** | 自主性能优化 | **P1** | 细分 `ai/physics/render` 耗时，帮助 Agent 定位低效算法并重构代码 |
-| **7** | **脚本模块化与子目录动态加载 (Modular Require/Load)** | 代码工程化管理 | **P2** | 突破单层平铺目录限制，支持复杂游戏的子模块划分与作用域隔离 |
-| **8** | **连续输入与物理时序 (Continuous Input & KeyUp/Hold)** | 游戏品类扩展 | **P2** | 支持按键释放（KeyUp）与长按持续时间，解锁即时物理与平台跳跃类玩法 |
+| **1** | **可控随机种子与确定性仿真 (Deterministic PRNG & Seed)** | 稳定性 / 可复现性 | **✅ 已落地 (v3.0)** | 引入 `StdRng::seed_from_u64`、`(random:seed! n)` 与 `step_simulation(seed)`，彻底消除测试偶发抖动，Bug 100% 确定性单步复现 |
+| **2** | **批量断言与富差值反馈 (Batch Assertions & Rich Diff)** | 交互效率 / Token | **✅ 已落地 (v3.0)** | `eval_assertion(exprs)` + `assert:equal` / `assert:true`，一次 MCP 请求返回聚合通过数与 `expected vs actual` 结构化差值 |
+| **3** | **状态按需投影与字段掩码 (State Projection / Mask)** | Token 上下文经济学 | **✅ 已落地 (v3.0)** | 新增 `query_state(paths)` 与 `step_simulation(state_projection)`，提取指定点路径，避免百 KB 全量状态撑爆大模型 Context |
+| **4** | **时序事件流与全局遥测 (Temporal Event Telemetry)** | 观测精度 / 调试 | **✅ 已落地 (v3.0)** | `*current-tick*` 绑定每帧，`player:add-log` 全量附加 `"tick": current_tick`，实现精确到帧号的时间戳时序关联 |
+| **5** | **状态增量路径过滤 (State Diff Path Scoping)** | 比对性能 / 噪声消除 | **✅ 已落地 (v3.0)** | `get_state_diff` 与 `step_simulation` 支持 `path_prefix` 与 `exclude_keys`（默认屏蔽 `chunks`），消除巨型瓦片噪声 |
+| **6** | **运行期性能剖析与热点打点 (Performance Profiler)** | 自主性能优化 | **⏳ 规划中 (P1)** | 细分 `ai/physics/render` 耗时，帮助 Agent 定位低效算法并重构代码 |
+| **7** | **脚本模块化与子目录动态加载 (Modular Require/Load)** | 代码工程化管理 | **⏳ 规划中 (P2)** | 突破单层平铺目录限制，支持复杂游戏的子模块划分与作用域隔离 |
+| **8** | **连续输入与物理时序 (Continuous Input & KeyUp/Hold)** | 游戏品类扩展 | **✅ 已落地 (v3.0)** | `PlayerInput::Key` 增加 `action: KeyAction { Down, Up }`，前端监听 `keyup`，Scheme 跟踪 `pressed_keys` 与 `hold_ticks`，支持长按物理 |
 
 ---
 
