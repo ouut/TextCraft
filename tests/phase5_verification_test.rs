@@ -111,6 +111,7 @@ async fn test_task_5_1_admin_disconnect_grace_period_and_reconnect() {
         shift: false,
         ctrl: false,
         alt: false,
+        action: Default::default(),
     });
     ws1.send(Message::Text(DualCodec::encode_text(&move_input).unwrap()))
         .await
@@ -259,6 +260,7 @@ fn test_task_5_1_token_persistence_across_leave_and_rejoin() {
                 shift: false,
                 ctrl: false,
                 alt: false,
+                action: Default::default(),
             },
         )
         .unwrap();
@@ -270,6 +272,7 @@ fn test_task_5_1_token_persistence_across_leave_and_rejoin() {
                 shift: false,
                 ctrl: false,
                 alt: false,
+                action: Default::default(),
             },
         )
         .unwrap();
@@ -384,6 +387,7 @@ fn test_task_5_2_merchant_dialog_contract_and_actions() {
         shift: false,
         ctrl: false,
         alt: false,
+        action: Default::default(),
     };
 
     // 1. Interact with merchant -> verify dialog object structure
@@ -619,6 +623,7 @@ async fn test_task_5_1_multi_user_url_token_routing_and_offline_ghost_filtering(
                     shift: false,
                     ctrl: false,
                     alt: false,
+                    action: Default::default(),
                 },
             ))
             .unwrap(),
@@ -832,6 +837,7 @@ async fn test_task_5_3_ansi_rle_compactness_and_10_players_tick_benchmark() {
         shift: false,
         ctrl: false,
         alt: false,
+        action: Default::default(),
     });
     clients[0]
         .send(Message::Text(DualCodec::encode_text(&move_msg).unwrap()))

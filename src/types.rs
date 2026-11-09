@@ -1,11 +1,21 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyAction {
+    #[default]
+    Down,
+    Up,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PlayerInput {
     #[serde(rename = "key")]
     Key {
         code: String,
+        #[serde(default)]
+        action: KeyAction,
         #[serde(default)]
         shift: bool,
         #[serde(default)]
@@ -51,6 +61,42 @@ pub enum TextCraftEvent {
     Error { text: String },
 }
 
+/// Thread-safe in-memory key-value blackboard storage for MCP agent state, temporary variables, and checkpoints.
+pub type McpStorage = std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, serde_json::Value>>>;
+
+/// Resolves a namespace and subkey from optional namespace and key strings.
+///
+/// Priority:
+/// 1. If explicit namespace is given and not empty/default, returns (namespace, stripped_or_original_key).
+/// 2. If key contains ':', splits into (namespace, subkey).
+/// 3. Otherwise returns ("default", key).
+pub fn resolve_namespace_and_key<'a>(
+    namespace: Option<&'a str>,
+    key: &'a str,
+) -> (&'a str, &'a str) {
+    let clean_ns = namespace.map(|s| s.trim()).filter(|s| !s.is_empty());
+    match clean_ns {
+        Some(ns) if ns != "default" => {
+            if let Some(sub) = key.strip_prefix(ns).and_then(|k| k.strip_prefix(':')) {
+                (ns, sub)
+            } else {
+                (ns, key)
+            }
+        }
+        _ => {
+            if let Some((ns, sub)) = key.split_once(':') {
+                if !ns.is_empty() && !sub.is_empty() {
+                    (ns, sub)
+                } else {
+                    ("default", key)
+                }
+            } else {
+                ("default", key)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,11 +108,13 @@ mod tests {
         match input {
             PlayerInput::Key {
                 code,
+                action,
                 shift,
                 ctrl,
                 alt,
             } => {
                 assert_eq!(code, "KeyW");
+                assert_eq!(action, KeyAction::Down);
                 assert!(!shift);
                 assert!(!ctrl);
                 assert!(!alt);
@@ -76,6 +124,7 @@ mod tests {
 
         let serialized = serde_json::to_string(&PlayerInput::Key {
             code: "KeyS".to_string(),
+            action: KeyAction::Up,
             shift: true,
             ctrl: false,
             alt: false,
@@ -83,6 +132,7 @@ mod tests {
         .unwrap();
         assert!(serialized.contains(r#""type":"key""#));
         assert!(serialized.contains(r#""code":"KeyS""#));
+        assert!(serialized.contains(r#""action":"up""#));
         assert!(serialized.contains(r#""shift":true"#));
     }
 

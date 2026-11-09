@@ -94,7 +94,7 @@ curl -s -X POST http://127.0.0.1:8082/mcp \
 
 ## 三、 宿主核心桥接工具：直接复用游戏命令与输入管线
 
-Rust 宿主层内置了 **3 个永不失效的核心桥接工具**（即使 `.scm` 脚本被改坏，AI 依然可以通过它们修复并重载脚本）：
+Rust 宿主层内置了 **16 个永不失效的核心宿主工具**（即使 `.scm` 脚本被改坏，AI 依然可以通过它们修复并重载脚本，或执行单步无头推演、状态按需投影与专用 MCP 存储黑板存取）：
 
 ### 1. `game_command` —— 复用游戏底部命令输入框与 `!` 管理员 REPL
 直接复用游戏内命令输入管线，支持两种模式：
@@ -121,14 +121,15 @@ Rust 宿主层内置了 **3 个永不失效的核心桥接工具**（即使 `.sc
 
 ### 2. `player_input` —— 模拟玩家键盘移动、UI 点击与鼠标交互
 直接复用 `process_player_input(player_id, input)`，模拟玩家操作并返回执行后的纯文本 `ascii_screen` 与 `hud`：
-- **模拟按键移动/交互 (`type: "key"`)**：
+- **模拟按键移动/交互 (`type: "key"`)**：支持 `action: "down" | "up"`（缺省为 `"down"`），以及 `shift`、`ctrl`、`alt` 修饰键：
   ```json
   {
     "name": "player_input",
     "arguments": {
       "player_id": 1,
       "type": "key",
-      "code": "KeyD"
+      "code": "KeyD",
+      "action": "down"
     }
   }
   ```
@@ -145,16 +146,318 @@ Rust 宿主层内置了 **3 个永不失效的核心桥接工具**（即使 `.sc
   }
   ```
 
-### 3. `reload_scripts` —— 强制无损热重载 `.scm` 脚本
-无视 `--watch` 开关或 2 秒轮询间隔，立即扫描并重编译 `scripts/` 下的 `.scm` 文件（自动导出并恢复 `*world-state*`）：
-- 编译成功返回 `"Reloaded successfully"`（`isError: false`）；
-- 若新脚本存在括号不匹配等语法错误，自动回滚世界状态并返回详细编译错误栈（`isError: true`），方便 AI 改完 `.scm` 文件后立即自检修复。
+### 3. `reload_scripts` —— 热重载与干净重置 `.scm` 脚本
+无视 `--watch` 开关或 2 秒轮询间隔，立即扫描并重编译 `scripts/` 下的全部 `.scm` 根脚本文件。
+支持可选参数 `clean: bool`（**默认 `true`**）：
+- **干净重置模式（`clean: true`，默认/缺省）**：
+  编译新脚本后，**不恢复旧状态**，主动重新调用 `(engine:on-init)`，以全新初始状态重置世界并刷新画面（递增渲染版本号），适合 AI Agent 重新初始化世界或开发新游戏原型时使用。
+  ```json
+  {
+    "name": "reload_scripts",
+    "arguments": {
+      "clean": true
+    }
+  }
+  ```
+  （注：调用时不传 `arguments` 或省略 `clean` 字段同样默认执行干净重置。）
+- **无损热补丁模式（`clean: false`）**：
+  保持原有的无损热重载逻辑，在编译前导出当前虚拟机状态，并在编译成功后完整恢复 `*world-state*`（用于玩家在线游玩时无缝打热补丁）。
+  ```json
+  {
+    "name": "reload_scripts",
+    "arguments": {
+      "clean": false
+    }
+  }
+  ```
+- **自动安全回滚**：
+  若新脚本存在括号不匹配、未定义变量等语法或编译错误，无论 `clean` 参数为何值，均会自动安全回滚恢复重载前的原有世界状态，并返回详细编译错误栈（`isError: true`），方便 AI Agent 改完 `.scm` 文件后立即自检与修复。
+
+### 4. `pause_clock` 与 `resume_clock` —— 虚拟模拟时钟暂停与恢复
+- `pause_clock`: 将主物理时钟暂停。世界 `tick(dt)` 推进立即停止，但 WebSocket 网络消息收发、心跳与 MCP 请求正常保活，方便 AI 介入冻结现场并执行精确诊断。
+- `resume_clock`: 恢复物理时钟定时驱动。
+
+### 5. `step_simulation` —— 虚拟时钟多步推演、确定性种子与输入注入
+支持以任意步长 `dt` 单步或连续推演指定步数 `steps`，支持确定性伪随机种子 `seed`，支持按键长按持续时间 `hold_ticks`，以及状态投影和范围差分：
+```json
+{
+  "name": "step_simulation",
+  "arguments": {
+    "steps": 3,
+    "dt": 0.016,
+    "seed": 12345,
+    "inputs": [
+      {
+        "step": 0,
+        "player_id": 1,
+        "type": "key",
+        "code": "KeyD",
+        "action": "down"
+      }
+    ],
+    "hold_ticks": 3,
+    "state_projection": ["players.1.x", "players.1.hp"],
+    "include_snapshot": true,
+    "snapshot_player_id": 1,
+    "include_state_diff": true,
+    "diff_path_prefix": "players.1",
+    "diff_exclude_keys": ["chunks"]
+  }
+}
+```
+- `seed`: 可选 64 位整型种子，推演开始前配置确定性 PRNG，相同状态 + 相同种子 + 相同按键 = 100% 确定性时空复现。
+- `hold_ticks`: 可选长按帧数，在执行指定步数期间自动维持按键按压并在结束时释放，解锁即时物理跳跃与连续移动。
+- `state_projection`: 可选路径投影列表（如 `["players.1.x", "tick_count"]`），从世界状态按需投影，避免返回巨型全量状态。
+- `diff_exclude_keys`: 增量差分排除键（**缺省默认排除 `["chunks"]`**），屏蔽数十万字节不变瓦片噪声。
+
+### 6. `get_state_diff` —— 轻量级微秒级状态差分比较与路径范围过滤
+对比前后两个 JSON 状态树或当前内存世界状态，支持指定前缀路径和排除键：
+```json
+{
+  "name": "get_state_diff",
+  "arguments": {
+    "path_prefix": "players.1",
+    "exclude_keys": ["chunks"]
+  }
+}
+```
+以扁平化路径输出：
+- `changed`: 如 `"players.1.x": { "old": 5, "new": 6 }`
+- `added`: 如 `"players.2": { ... }`
+- `removed`: 如 `"score": 0`
+
+### 7. `query_state` —— 状态按需投影与字段掩码 (Field Masking)
+按需抓取指定的点分隔路径字段，将数十 KB 甚至几百 KB 的巨型世界状态树压缩为仅含核心关注字段的微型 JSON：
+```json
+{
+  "name": "query_state",
+  "arguments": {
+    "paths": ["tick_count", "players.1.x", "players.1.hp", "monsters"]
+  }
+}
+```
+返回仅包含请求路径的树状 JSON 对象，极大节省大模型上下文 Token。
+
+### 8. `eval_assertion` —— 批量断言与富差值对比 (TDD 单元测试套件)
+在带有看门狗保护的 Scheme 沙箱中求值单个或批量断言表达式，支持富差值诊断：
+- **单表达式模式**：支持 `expr` 或 `code` 字符串参数。
+- **批量模式 (`exprs: string[]`)**：
+  ```json
+  {
+    "name": "eval_assertion",
+    "arguments": {
+      "exprs": [
+        "(= (+ 2 3) 5)",
+        "(assert:equal (get-gold 1) 20)",
+        "(assert:true (= (get-hp 1) 100))"
+      ]
+    }
+  }
+  ```
+  返回结构化聚合测试报告：
+  ```json
+  {
+    "all_passed": false,
+    "total": 3,
+    "passed": 2,
+    "failed": 1,
+    "results": [ ... ],
+    "failures": [
+      {
+        "expr": "(assert:equal (get-gold 1) 20)",
+        "expected": 20,
+        "actual": 15
+      }
+    ]
+  }
+  ```
+  配合 Scheme 内置原语 `(assert:equal actual expected)` 与 `(assert:true cond)`，Agent 即可单次请求执行完整测试套件并获取精准预期差值。
+
+### 8. `mcp_store_set` —— 写入专用 MCP 存储 / 智能体黑板
+在 Rust 宿主专用内存存储（Blackboard）中存储或更新任意 JSON 数据，完全不污染游戏脚本的业务状态或正常游戏存档：
+```json
+{
+  "name": "mcp_store_set",
+  "arguments": {
+    "key": "exploration_plan",
+    "value": { "phase": 1, "target": "dungeon_north", "rooms_visited": [101, 102] },
+    "namespace": "agent_alpha"
+  }
+}
+```
+- 参数：`key: string`（必需），`value: any`（必需，任意基本类型/对象/数组），`namespace?: string`（可选命名空间，默认 `"default"`）。
+
+### 9. `mcp_store_get` —— 读取专用 MCP 存储数据项
+根据键名和可选命名空间获取数据。若不存在返回 `{"found": false, "value": null}`：
+```json
+{
+  "name": "mcp_store_get",
+  "arguments": {
+    "key": "exploration_plan",
+    "namespace": "agent_alpha"
+  }
+}
+```
+
+### 10. `mcp_store_delete` —— 删除专用 MCP 存储数据项
+从专用存储中删除指定数据项：
+```json
+{
+  "name": "mcp_store_delete",
+  "arguments": {
+    "key": "exploration_plan",
+    "namespace": "agent_alpha"
+  }
+}
+```
+
+### 11. `mcp_store_list` —— 列出指定命名空间或匹配前缀的键
+列出当前专用存储中的所有键，支持按命名空间过滤或按前缀过滤：
+```json
+{
+  "name": "mcp_store_list",
+  "arguments": {
+    "namespace": "agent_alpha",
+    "prefix": "explor"
+  }
+}
+```
+
+### 12. `mcp_store_clear` —— 清空专用存储
+清空专用存储中全部数据，或仅清空指定命名空间下的数据：
+```json
+{
+  "name": "mcp_store_clear",
+  "arguments": {
+    "namespace": "agent_alpha"
+  }
+}
+```
+
+### 13. `mcp_store_export` —— 导出专用 MCP 存储
+将专用存储完整备份至磁盘文件：
+```json
+{
+  "name": "mcp_store_export",
+  "arguments": {
+    "path": "backups/agent_memory.json"
+  }
+}
+```
+
+### 14. `mcp_store_import` —— 导入专用 MCP 存储
+从磁盘文件恢复专用存储（支持 `overwrite` 覆盖或合并）：
+```json
+{
+  "name": "mcp_store_import",
+  "arguments": {
+    "path": "backups/agent_memory.json",
+    "overwrite": true
+  }
+}
+```
 
 ---
 
 ## 四、 Scheme 动态 MCP 工具系统 (`mcp:def-tool`)
 
-### 4.1 预置的 Scheme 游戏开发与调试工具 (`scripts/main.scm`)
+### 4.1 核心范式：时光机快照与专用 MCP 存储（mcp-store）的纯脚本自举实现
+
+TextCraft 贯彻**「机制在宿主，策略与功能在脚本」**的极简架构哲学。
+Rust 宿主仅提供一组通用的专用存储 KV 桥接原语（`engine:raw-mcp-store-*` 与 Scheme 封装函数 `(mcp-store:set! ...)`、`(mcp-store:get ...)`），完全不需要在宿主为快照特化硬编码接口。
+
+Scheme 脚本利用通用存储原语，将快照写入专用 MCP 存储的 `"checkpoint"` 命名空间中，并通过 `(mcp:def-tool ...)` 动态注册给 Agent：
+
+```scheme
+;; scripts/prelude.scm 中的通用存取封装与时光机实现：
+
+;; 1. 通用 MCP 存储操作函数（支持任意命名空间）
+(define (mcp-store:set! key val . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-set! key val ns)))
+
+(define (mcp-store:get key . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-get key ns)))
+
+(define (mcp-store:list . rest)
+  (let ((ns (if (null? rest) "" (car rest))))
+    (engine:raw-mcp-store-list ns)))
+
+(define (mcp-store:delete! key . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-delete! key ns)))
+
+;; 2. 基于 mcp-store 的快照保存与回滚
+(define (checkpoint:save tag)
+  (let* ((str-tag (if (string? tag) tag (to-string tag)))
+         (safe-tag (if (string=? str-tag "") "latest" str-tag)))
+    (engine:raw-mcp-store-set! safe-tag *world-state* "checkpoint")
+    safe-tag))
+
+(define (checkpoint:restore tag)
+  (let* ((str-tag (if (string? tag) tag (to-string tag)))
+         (safe-tag (if (string=? str-tag "") "latest" str-tag))
+         (saved (engine:raw-mcp-store-get safe-tag "checkpoint")))
+    (if saved
+        (begin
+          (set! *world-state* saved)
+          (bump-visual-version!)
+          #t)
+        #f)))
+
+;; 3. 动态暴露出 create_checkpoint 与 rollback_checkpoint 供 MCP 客户端直接调用
+(mcp:def-tool
+  "create_checkpoint"
+  "Scheme 脚本自驱动时光机：在专用 MCP 存储中保存当前游戏世界状态快照 (Checkpoint)"
+  (hash "type" "object"
+        "properties" (hash "tag" (hash "type" "string" "description" "快照标签名称 (默认 'latest')")))
+  (lambda (args)
+    (let* ((tag (map-get args "tag" "latest"))
+           (saved-tag (checkpoint:save tag)))
+      (hash "success" #t
+            "tag" saved-tag
+            "namespace" "checkpoint"
+            "message" (string-append "Checkpoint '" saved-tag "' saved to dedicated mcp-store successfully")))))
+
+(mcp:def-tool
+  "rollback_checkpoint"
+  "Scheme 脚本自驱动时光机：从专用 MCP 存储中瞬间回滚游戏世界状态"
+  (hash "type" "object"
+        "properties" (hash "tag" (hash "type" "string" "description" "要回滚的快照标签名称 (默认 'latest')")))
+  (lambda (args)
+    (let* ((tag (map-get args "tag" "latest"))
+           (ok (checkpoint:restore tag)))
+      (if ok
+          (hash "success" #t
+                "tag" tag
+                "message" (string-append "Successfully rolled back to checkpoint '" tag "'"))
+          (hash "success" #f
+                "error" (string-append "Checkpoint '" tag "' not found in mcp-store"))))))
+```
+
+#### 架构收益：
+1. **统一黑板与持久化**：所有快照统一沉淀于 `mcp_storage` 的 `"checkpoint"` 命名空间。AI Agent 调用 `mcp_store_export` 时，快照随同演化黑板一起导出至磁盘，支持跨进程会话恢复。
+2. **统一巡检**：Agent 可直接调用 `mcp_store_list(namespace: "checkpoint")` 查询当前所有快照标签。
+3. **极简基座**：Rust 宿主零特化业务代码，机制通用，策略全部自举在 Scheme 脚本中。
+
+#### 调用方式：
+Agent 通过标准 MCP JSON-RPC 直接调用：
+```json
+// 1. 创建快照
+{
+  "name": "create_checkpoint",
+  "arguments": { "tag": "before_boss" }
+}
+
+// 2. 回滚快照
+{
+  "name": "rollback_checkpoint",
+  "arguments": { "tag": "before_boss" }
+}
+```
+
+### 4.2 预置的 Scheme 游戏开发与调试工具 (`scripts/main.scm`)
 
 `scripts/main.scm` 默认通过 `(mcp:def-tool ...)` 注册了 4 个高频工具：
 
@@ -165,7 +468,7 @@ Rust 宿主层内置了 **3 个永不失效的核心桥接工具**（即使 `.sc
 | `teleport_player` | `{ "player_id"?: 1, "x": 5, "y": -3 }` | 将指定玩家瞬移至 `(x, y)`，向其 HUD 日志推送 `[mcp] AI 将你传送至 (x, y)`，并触发画面刷新 |
 | `spawn_monster` | `{ "id": "boss_1", "name": "炎魔", "glyph": "B", "x": 4, "y": 2, "hp"?: 120, "attack"?: 18 }` | 在 `(x, y)` 处动态生成新怪物，写入 `*world-state*["monsters"]` 与 `'actor` 图层，并向全服玩家广播警告日志 |
 
-### 4.2 如何用 `(mcp:def-tool ...)` 动态开发新的 MCP 工具
+### 4.3 如何用 `(mcp:def-tool ...)` 动态开发新的 MCP 工具
 
 `scripts/prelude.scm` 提供了极简的声明式注册函数：
 
@@ -233,3 +536,10 @@ AI 甚至无需修改磁盘文件，直接通过 `game_command` 发送 `! (mcp:d
 }
 ```
 随后调用 `tools/list` 即可发现 `gift_gold`，并通过 `tools/call` 直接使用！
+
+---
+
+## 五、 后续优化与演进规划 (TODO)
+
+关于下一阶段将 TextCraft 打磨为工业级自闭环引擎的 8 大深度演进课题（可控随机种子、批量断言、状态按需投影、时序事件流等），请参阅详细规划文档：
+👉 [TextCraft MCP 深度优化与自闭环演进 TODO 规划](file:///workspace/TextCraft/docs/develop/mcp_todo.md)

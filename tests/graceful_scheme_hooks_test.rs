@@ -131,7 +131,7 @@ fn test_hot_reload_updates_hook_cache() {
         "(define (engine:target-fps) 30)\n",
     ).unwrap();
 
-    let reload_res = logic.force_reload();
+    let reload_res = logic.force_reload(false);
     assert!(reload_res.is_ok(), "force_reload should succeed: {:?}", reload_res.err());
 
     // Hook registry should now have engine:target-fps

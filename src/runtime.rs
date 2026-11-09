@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
@@ -200,6 +202,8 @@ async fn mcp_http_handler(
     }
 }
 
+pub use crate::types::{resolve_namespace_and_key, McpStorage};
+
 /// Core server gateway and session scheduling coordinator.
 pub struct TextCraftServer {
     pub handle: ServerHandle<PlayerInput, TextCraftCommand, PlayerSnapshot, TextCraftEvent>,
@@ -209,6 +213,8 @@ pub struct TextCraftServer {
     pub autosave_sec: u64,
     pub snapshot_heartbeat_ms: u64,
     pub log_level: LogLevel,
+    pub is_paused: Arc<AtomicBool>,
+    pub mcp_storage: McpStorage,
     last_snapshots: HashMap<PlayerId, (Instant, PlayerSnapshot)>,
     player_tokens: HashMap<PlayerId, String>,
     last_reload_check: Option<Instant>,
@@ -273,6 +279,14 @@ impl TextCraftServer {
             let mcp_addr: SocketAddr = format!("{}:{}", args.host, mcp_port).parse()?;
             server.start_mcp_server(mcp_addr).await?;
         }
+        if let Some(save_path) = server.logic.save_file() {
+            let mcp_path = save_path.with_extension("mcp.json");
+            if mcp_path.exists() {
+                if let Err(e) = server.mcp_store_import_from_file(&mcp_path, true) {
+                    tracing::warn!(error = %e, "Failed to load MCP storage from save file");
+                }
+            }
+        }
         Ok(server)
     }
 
@@ -292,6 +306,8 @@ impl TextCraftServer {
         >(config)
         .await?;
 
+        let mcp_storage = logic.mcp_storage.clone();
+
         Ok(Self {
             handle,
             logic,
@@ -300,6 +316,8 @@ impl TextCraftServer {
             autosave_sec,
             snapshot_heartbeat_ms: 1000,
             log_level: LogLevel::Info,
+            is_paused: Arc::new(AtomicBool::new(false)),
+            mcp_storage,
             last_snapshots: HashMap::new(),
             player_tokens: HashMap::new(),
             last_reload_check: None,
@@ -347,6 +365,173 @@ impl TextCraftServer {
     pub fn with_snapshot_heartbeat_ms(mut self, ms: u64) -> Self {
         self.snapshot_heartbeat_ms = ms;
         self
+    }
+
+    // ==========================================
+    // Dedicated MCP Storage & Blackboard Methods
+    // ==========================================
+
+    /// Retrieve a stored value from dedicated MCP storage by key.
+    pub fn mcp_store_get(&self, key: &str) -> Option<serde_json::Value> {
+        self.mcp_store_get_scoped(None, key)
+    }
+
+    /// Store a value into dedicated MCP storage.
+    pub fn mcp_store_set(&self, key: &str, value: serde_json::Value) {
+        self.mcp_store_set_scoped(None, key, value);
+    }
+
+    /// Delete a stored key from dedicated MCP storage.
+    pub fn mcp_store_delete(&self, key: &str) -> bool {
+        self.mcp_store_delete_scoped(None, key)
+    }
+
+    /// List all keys in dedicated MCP storage, optionally filtered by key prefix.
+    pub fn mcp_store_list(&self, prefix: Option<&str>) -> Vec<String> {
+        self.mcp_store_list_scoped(None, prefix)
+    }
+
+    /// Clear all keys across all namespaces in dedicated MCP storage.
+    pub fn mcp_store_clear(&self) {
+        self.mcp_storage.write().clear();
+    }
+
+    /// Retrieve a stored value with explicit namespace support.
+    pub fn mcp_store_get_scoped(
+        &self,
+        namespace: Option<&str>,
+        key: &str,
+    ) -> Option<serde_json::Value> {
+        let (ns, sub) = resolve_namespace_and_key(namespace, key);
+        let composite = format!("{}:{}", ns, sub);
+        let guard = self.mcp_storage.read();
+        guard
+            .get(&composite)
+            .cloned()
+            .or_else(|| guard.get(key).cloned())
+    }
+
+    /// Store a value with explicit namespace support.
+    pub fn mcp_store_set_scoped(
+        &self,
+        namespace: Option<&str>,
+        key: &str,
+        value: serde_json::Value,
+    ) {
+        let (ns, sub) = resolve_namespace_and_key(namespace, key);
+        let composite = format!("{}:{}", ns, sub);
+        let mut guard = self.mcp_storage.write();
+        guard.insert(composite, value);
+    }
+
+    /// Delete a key with explicit namespace support.
+    pub fn mcp_store_delete_scoped(&self, namespace: Option<&str>, key: &str) -> bool {
+        let (ns, sub) = resolve_namespace_and_key(namespace, key);
+        let composite = format!("{}:{}", ns, sub);
+        let mut guard = self.mcp_storage.write();
+        let r1 = guard.remove(&composite).is_some();
+        let r2 = guard.remove(key).is_some();
+        r1 || r2
+    }
+
+    /// List keys filtered by namespace and/or prefix.
+    pub fn mcp_store_list_scoped(
+        &self,
+        namespace: Option<&str>,
+        prefix: Option<&str>,
+    ) -> Vec<String> {
+        let guard = self.mcp_storage.read();
+        if let Some(ns) = namespace.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let ns_prefix = format!("{}:", ns);
+            let mut list: Vec<String> = guard
+                .keys()
+                .filter_map(|k| {
+                    if let Some(sub) = k.strip_prefix(&ns_prefix) {
+                        if prefix.is_none_or(|p| sub.starts_with(p) || k.starts_with(p)) {
+                            Some(sub.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            list.sort();
+            list
+        } else {
+            let mut list: Vec<String> = guard
+                .keys()
+                .filter(|k| prefix.is_none_or(|p| k.starts_with(p)))
+                .cloned()
+                .collect();
+            list.sort();
+            list
+        }
+    }
+
+    /// Clear dedicated MCP storage, optionally limited to a specific namespace.
+    pub fn mcp_store_clear_scoped(&self, namespace: Option<&str>) -> usize {
+        if let Some(ns) = namespace.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let ns_prefix = format!("{}:", ns);
+            let mut guard = self.mcp_storage.write();
+            let to_remove: Vec<String> = guard
+                .keys()
+                .filter(|k| k.starts_with(&ns_prefix))
+                .cloned()
+                .collect();
+            let count = to_remove.len();
+            for k in to_remove {
+                guard.remove(&k);
+            }
+            count
+        } else {
+            let mut guard = self.mcp_storage.write();
+            let count = guard.len();
+            guard.clear();
+            count
+        }
+    }
+
+    /// Export dedicated MCP storage atomically to a JSON file.
+    pub fn mcp_store_export_to_file(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let tmp_path = path.with_extension(format!(
+            "{}.tmp",
+            path.extension().and_then(|s| s.to_str()).unwrap_or("json")
+        ));
+        let guard = self.mcp_storage.read();
+        let content =
+            serde_json::to_string_pretty(&*guard).map_err(std::io::Error::other)?;
+        std::fs::write(&tmp_path, content)?;
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+
+    /// Import entries into dedicated MCP storage from a JSON file.
+    pub fn mcp_store_import_from_file(
+        &self,
+        path: &Path,
+        overwrite: bool,
+    ) -> std::io::Result<usize> {
+        if !path.exists() {
+            return Ok(0);
+        }
+        let content = std::fs::read_to_string(path)?;
+        let map: HashMap<String, serde_json::Value> =
+            serde_json::from_str(&content).map_err(std::io::Error::other)?;
+        let count = map.len();
+        let mut guard = self.mcp_storage.write();
+        for (k, v) in map {
+            if overwrite || !guard.contains_key(&k) {
+                guard.insert(k, v);
+            }
+        }
+        Ok(count)
     }
 
     /// Returns the bound local socket address.
@@ -459,10 +644,12 @@ impl TextCraftServer {
         // 4.5. Drain and execute MCP JSON-RPC 2.0 requests safely on the main simulation thread
         self.drain_mcp_requests();
 
-        // 5. Advance world simulation tick
-        let tick_id = self.handle.increment_server_tick();
-        if let Err(e) = self.logic.on_tick(dt, tick_id) {
-            tracing::warn!(error = %e, "on_tick error");
+        // 5. Advance world simulation tick (skipped when is_paused is true)
+        if !self.is_paused.load(Ordering::Relaxed) {
+            let tick_id = self.handle.increment_server_tick();
+            if let Err(e) = self.logic.on_tick(dt, tick_id) {
+                tracing::warn!(error = %e, "on_tick error");
+            }
         }
 
         // 6. Drain outbound messages generated by Scheme host functions
@@ -670,7 +857,7 @@ impl TextCraftServer {
                         },
                         "action": {
                             "type": "string",
-                            "description": "UI action name when type='ui' (e.g. 'use_item', 'buy_potion', 'close_dialog')"
+                            "description": "Key action ('down' | 'up') when type='key' (default: 'down'), or UI action name when type='ui' (e.g. 'use_item', 'buy_potion', 'close_dialog')"
                         },
                         "payload": {
                             "type": "object",
@@ -694,10 +881,286 @@ impl TextCraftServer {
             }),
             serde_json::json!({
                 "name": "reload_scripts",
-                "description": "Force immediate hot-reload of all Scheme (.scm) scripts in scripts/ while preserving *world-state*, returning 'Reloaded successfully' or detailed compilation errors.",
+                "description": "Force immediate hot-reload of all Scheme (.scm) scripts in scripts/. If clean is true (default), re-initializes world state via (engine:on-init); if false, preserves existing *world-state*.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "clean": {
+                            "type": "boolean",
+                            "description": "Whether to perform a clean reload by re-calling (engine:on-init) instead of restoring previous world state. Defaults to true."
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "pause_clock",
+                "description": "Pause the physical game simulation clock. Tick advancing will halt, while WebSocket connections, network heartbeats, and commands remain fully active.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
+                }
+            }),
+            serde_json::json!({
+                "name": "resume_clock",
+                "description": "Resume the physical game simulation clock.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }),
+            serde_json::json!({
+                "name": "step_simulation",
+                "description": "Step forward the simulation world state deterministically by a specified number of ticks, optionally injecting player inputs, calculating state diffs, and rendering snapshots.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "integer",
+                            "description": "Number of simulation steps to advance (default: 1)"
+                        },
+                        "dt": {
+                            "type": "number",
+                            "description": "Delta time per step in seconds (default: 0.016)"
+                        },
+                        "seed": {
+                            "type": "integer",
+                            "description": "Optional deterministic PRNG seed to set before stepping"
+                        },
+                        "state_projection": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional list of dot-separated paths to project and return from world state instead of full state (e.g. ['players.1.x', 'players.1.gold'])"
+                        },
+                        "diff_path_prefix": {
+                            "type": "string",
+                            "description": "Optional dot-separated key path prefix to scope the diff comparison (e.g. 'players.1')"
+                        },
+                        "diff_exclude_keys": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional list of keys to exclude from state diff comparison (defaults to ['chunks'])"
+                        },
+                        "inputs": {
+                            "type": "array",
+                            "description": "Optional player inputs to inject during stepping. Each item: { player_id, input, step?, hold_ticks? }",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "player_id": { "type": "integer" },
+                                    "step": { "type": "integer", "description": "0-based step index at which to inject this input (default: 0)" },
+                                    "hold_ticks": { "type": "integer", "description": "Optional number of ticks to hold this key down. Automatically injects 'action': 'down' at 'step', and 'action': 'up' at 'step + hold_ticks'." },
+                                    "type": { "type": "string", "enum": ["key", "ui", "mouse", "cmd"] },
+                                    "code": { "type": "string" },
+                                    "action": { "type": "string", "description": "Key action ('down' | 'up') when type='key', or UI action name when type='ui'" },
+                                    "payload": { "type": "object" },
+                                    "command": { "type": "string" },
+                                    "x": { "type": "integer" },
+                                    "y": { "type": "integer" },
+                                    "button": { "type": "string" }
+                                }
+                            }
+                        },
+                        "include_snapshot": {
+                            "type": "boolean",
+                            "description": "Whether to include the latest ANSI viewport and HUD in output (default: false)"
+                        },
+                        "snapshot_player_id": {
+                            "type": "integer",
+                            "description": "Target player ID for viewport snapshot when include_snapshot is true (default: 1)"
+                        },
+                        "include_state_diff": {
+                            "type": "boolean",
+                            "description": "Whether to calculate and return state diff between before and after step execution (default: false)"
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "get_state_diff",
+                "description": "Compute flat recursive key-path state diff (added, removed, changed) between two JSON states or against current exported world state.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "old_state": {
+                            "type": "object",
+                            "description": "Base state to compare from. If omitted, uses current world state."
+                        },
+                        "new_state": {
+                            "type": "object",
+                            "description": "Target state to compare to. If omitted, uses current world state."
+                        },
+                        "path_prefix": {
+                            "type": "string",
+                            "description": "Optional dot-separated key path prefix to scope the diff comparison to a subtree (e.g. 'players.1')"
+                        },
+                        "exclude_keys": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional list of keys or key paths to exclude from diff comparison (e.g. ['chunks'])"
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "query_state",
+                "description": "Query and project specific parts of current exported world state by dot-separated path masks (e.g. ['players.1.x', 'players.1.hp', 'monsters.boss_1.hp']) to reduce token overhead.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "List of dot-separated key paths to extract (e.g. ['players.1.x', 'players.1.gold'])"
+                        }
+                    },
+                    "required": ["paths"]
+                }
+            }),
+            serde_json::json!({
+                "name": "eval_assertion",
+                "description": "Evaluate Scheme assertion expressions under watchdog protection. Supports single expression ('code' or 'expr') or batch assertions ('exprs'). Returns structured assertion report with pass/fail and rich diff details.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Scheme assertion expression to evaluate, e.g. '(= (map-get (get-player 1) \"x\" 0) 5)'"
+                        },
+                        "expr": {
+                            "type": "string",
+                            "description": "Alias for code: single Scheme assertion expression to evaluate"
+                        },
+                        "exprs": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Batch of Scheme assertion expressions to evaluate together in one request"
+                        },
+                        "timeout_ms": {
+                            "type": "integer",
+                            "description": "Watchdog timeout in milliseconds per assertion (default: 1000)"
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_set",
+                "description": "Store or update an arbitrary JSON value in dedicated MCP agent storage (blackboard) without polluting game state or normal saves.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Storage key identifier"
+                        },
+                        "value": {
+                            "description": "Arbitrary JSON value to store (object, array, string, number, bool)"
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional namespace partition (default: 'default')"
+                        }
+                    },
+                    "required": ["key", "value"]
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_get",
+                "description": "Retrieve a stored value from dedicated MCP agent storage by key and optional namespace.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Storage key identifier"
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional namespace partition (default: 'default')"
+                        }
+                    },
+                    "required": ["key"]
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_delete",
+                "description": "Delete a key-value entry from dedicated MCP agent storage.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "key": {
+                            "type": "string",
+                            "description": "Storage key identifier"
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional namespace partition (default: 'default')"
+                        }
+                    },
+                    "required": ["key"]
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_list",
+                "description": "List keys stored in dedicated MCP storage filtered by namespace or key prefix.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "prefix": {
+                            "type": "string",
+                            "description": "Optional prefix to filter keys"
+                        },
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional namespace partition to list within"
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_clear",
+                "description": "Clear all entries in dedicated MCP agent storage, or only entries within a specific namespace.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {
+                            "type": "string",
+                            "description": "Optional namespace to clear. If omitted, clears all entries across all namespaces."
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_export",
+                "description": "Export the entire MCP dedicated storage to a JSON file or inline JSON object.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Optional destination file path on disk. If omitted, returns full storage data inline."
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "mcp_store_import",
+                "description": "Import key-value entries into MCP dedicated storage from a file or inline JSON object.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Optional source file path on disk"
+                        },
+                        "data": {
+                            "type": "object",
+                            "description": "Optional JSON key-value map to import directly"
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "Whether to overwrite existing keys (default: true)"
+                        }
+                    }
                 }
             }),
         ]
@@ -869,25 +1332,33 @@ impl TextCraftServer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("key");
                 let input = match input_type {
-                    "key" => PlayerInput::Key {
-                        code: arguments
-                            .get("code")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        shift: arguments
-                            .get("shift")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                        ctrl: arguments
-                            .get("ctrl")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                        alt: arguments
-                            .get("alt")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false),
-                    },
+                    "key" => {
+                        let action_str = arguments.get("action").and_then(|v| v.as_str()).unwrap_or("down");
+                        let action = match action_str {
+                            "up" => crate::types::KeyAction::Up,
+                            _ => crate::types::KeyAction::Down,
+                        };
+                        PlayerInput::Key {
+                            code: arguments
+                                .get("code")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            action,
+                            shift: arguments
+                                .get("shift")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            ctrl: arguments
+                                .get("ctrl")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            alt: arguments
+                                .get("alt")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                        }
+                    }
                     "ui" => PlayerInput::UIAction {
                         action: arguments
                             .get("action")
@@ -951,10 +1422,534 @@ impl TextCraftServer {
                     Err(err) => (err, true),
                 }
             }
-            "reload_scripts" => match self.logic.force_reload() {
-                Ok(()) => ("Reloaded successfully".to_string(), false),
-                Err(err) => (err, true),
-            },
+            "reload_scripts" => {
+                let clean = arguments
+                    .get("clean")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                match self.logic.force_reload(clean) {
+                    Ok(()) => ("Reloaded successfully".to_string(), false),
+                    Err(err) => (err, true),
+                }
+            }
+            "pause_clock" => {
+                self.is_paused.store(true, Ordering::Relaxed);
+                let out = serde_json::json!({
+                    "paused": true,
+                    "message": "Physical simulation clock paused"
+                });
+                (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
+            }
+            "resume_clock" => {
+                self.is_paused.store(false, Ordering::Relaxed);
+                let out = serde_json::json!({
+                    "paused": false,
+                    "message": "Physical simulation clock resumed"
+                });
+                (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
+            }
+            "step_simulation" => {
+                let start_time = Instant::now();
+                let steps = arguments.get("steps").and_then(|v| v.as_u64()).unwrap_or(1);
+                let dt = arguments.get("dt").and_then(|v| v.as_f64()).unwrap_or(0.016) as f32;
+                let include_snapshot = arguments.get("include_snapshot").and_then(|v| v.as_bool()).unwrap_or(false);
+                let snap_pid = arguments.get("snapshot_player_id").and_then(|v| v.as_u64()).unwrap_or(1);
+                let include_diff = arguments.get("include_state_diff").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                if let Some(seed_val) = arguments.get("seed").and_then(|v| v.as_i64()) {
+                    self.logic.set_random_seed(Some(seed_val as u64));
+                }
+
+                let initial_state = if include_diff {
+                    self.logic.export_state().ok()
+                } else {
+                    None
+                };
+
+                let empty_vec = Vec::new();
+                let input_items = arguments
+                    .get("inputs")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or(&empty_vec);
+
+                enum InjectedAction {
+                    Cmd(String),
+                    Key {
+                        code: String,
+                        action: crate::types::KeyAction,
+                        shift: bool,
+                        ctrl: bool,
+                        alt: bool,
+                    },
+                    UI {
+                        action: String,
+                        payload: serde_json::Value,
+                    },
+                    Mouse {
+                        x: i32,
+                        y: i32,
+                        button: String,
+                    },
+                }
+
+                struct ScheduledItem {
+                    step: u64,
+                    player_id: u64,
+                    action: InjectedAction,
+                }
+
+                let mut scheduled: Vec<ScheduledItem> = Vec::new();
+                for item in input_items {
+                    let pid = item.get("player_id").and_then(|v| v.as_u64()).unwrap_or(1);
+                    let step = item.get("step").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let input_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("key");
+                    match input_type {
+                        "cmd" => {
+                            if let Some(cmd_str) = item.get("command").and_then(|v| v.as_str()) {
+                                scheduled.push(ScheduledItem {
+                                    step,
+                                    player_id: pid,
+                                    action: InjectedAction::Cmd(cmd_str.to_string()),
+                                });
+                            }
+                        }
+                        "key" => {
+                            let code = item.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let shift = item.get("shift").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let ctrl = item.get("ctrl").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let alt = item.get("alt").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let hold_ticks = item.get("hold_ticks").and_then(|v| v.as_u64());
+
+                            if let Some(n) = hold_ticks {
+                                scheduled.push(ScheduledItem {
+                                    step,
+                                    player_id: pid,
+                                    action: InjectedAction::Key {
+                                        code: code.clone(),
+                                        action: crate::types::KeyAction::Down,
+                                        shift,
+                                        ctrl,
+                                        alt,
+                                    },
+                                });
+                                scheduled.push(ScheduledItem {
+                                    step: step + n,
+                                    player_id: pid,
+                                    action: InjectedAction::Key {
+                                        code,
+                                        action: crate::types::KeyAction::Up,
+                                        shift,
+                                        ctrl,
+                                        alt,
+                                    },
+                                });
+                            } else {
+                                let action_str = item.get("action").and_then(|v| v.as_str()).unwrap_or("down");
+                                let action = match action_str {
+                                    "up" => crate::types::KeyAction::Up,
+                                    _ => crate::types::KeyAction::Down,
+                                };
+                                scheduled.push(ScheduledItem {
+                                    step,
+                                    player_id: pid,
+                                    action: InjectedAction::Key {
+                                        code,
+                                        action,
+                                        shift,
+                                        ctrl,
+                                        alt,
+                                    },
+                                });
+                            }
+                        }
+                        "ui" => {
+                            let action = item.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let payload = item.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                            scheduled.push(ScheduledItem {
+                                step,
+                                player_id: pid,
+                                action: InjectedAction::UI { action, payload },
+                            });
+                        }
+                        "mouse" => {
+                            let x = item.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                            let y = item.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                            let button = item.get("button").and_then(|v| v.as_str()).unwrap_or("left").to_string();
+                            scheduled.push(ScheduledItem {
+                                step,
+                                player_id: pid,
+                                action: InjectedAction::Mouse { x, y, button },
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
+                for step_idx in 0..steps {
+                    // Inject inputs scheduled for this step
+                    for item in &scheduled {
+                        if item.step == step_idx {
+                            match &item.action {
+                                InjectedAction::Cmd(cmd_str) => {
+                                    let trimmed = cmd_str.trim();
+                                    if trimmed.starts_with('!') {
+                                        let code = trimmed.strip_prefix('!').unwrap_or(trimmed).trim();
+                                        let _ = self.logic.eval_repl(code);
+                                    } else {
+                                        let _ = self.logic.on_command(item.player_id, trimmed);
+                                    }
+                                }
+                                InjectedAction::Key { code, action, shift, ctrl, alt } => {
+                                    let _ = self.logic.on_input(item.player_id, &PlayerInput::Key {
+                                        code: code.clone(),
+                                        action: *action,
+                                        shift: *shift,
+                                        ctrl: *ctrl,
+                                        alt: *alt,
+                                    });
+                                }
+                                InjectedAction::UI { action, payload } => {
+                                    let _ = self.logic.on_ui_action(item.player_id, action, payload);
+                                }
+                                InjectedAction::Mouse { x, y, button } => {
+                                    let _ = self.logic.on_input(item.player_id, &PlayerInput::Mouse {
+                                        x: *x,
+                                        y: *y,
+                                        button: button.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Advance world simulation step
+                    let tick_id = self.handle.increment_server_tick();
+                    if let Err(e) = self.logic.on_tick(dt, tick_id) {
+                        return (format!("step_simulation tick failed at step {}: {}", step_idx, e), true);
+                    }
+                }
+
+                let final_tick = self.handle.server_tick();
+                let duration_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+
+                let mut out = serde_json::json!({
+                    "steps_executed": steps,
+                    "final_tick": final_tick,
+                    "duration_ms": duration_ms,
+                });
+
+                if include_snapshot {
+                    let pid_key = snap_pid.to_string();
+                    let p = self.logic.export_state().ok().and_then(|st| {
+                        st.get("players").and_then(|pls| pls.get(&pid_key)).cloned()
+                    });
+                    let (px, py) = if let Some(ref pval) = p {
+                        (pval.get("x").and_then(|v| v.as_i64()).unwrap_or(0),
+                         pval.get("y").and_then(|v| v.as_i64()).unwrap_or(0))
+                    } else {
+                        (0, 0)
+                    };
+                    let maybe_snap = match self.logic.render_snapshot(snap_pid) {
+                        Ok(Some(s)) => {
+                            self.last_snapshots.insert(snap_pid, (Instant::now(), s.clone()));
+                            Some(s)
+                        }
+                        Ok(None) => self.last_snapshots.get(&snap_pid).map(|(_, s)| s.clone()),
+                        Err(_) => None,
+                    };
+                    if let Some(snap) = maybe_snap {
+                        out["snapshot"] = serde_json::json!({
+                            "player_id": snap_pid,
+                            "x": px,
+                            "y": py,
+                            "ascii_screen": strip_ansi_codes(&snap.screen),
+                            "cols": snap.cols,
+                            "rows": snap.rows,
+                            "hud": snap.hud,
+                        });
+                    }
+                }
+
+                if let Some(proj_arr) = arguments.get("state_projection").and_then(|v| v.as_array()) {
+                    let paths: Vec<String> = proj_arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    if let Ok(st) = self.logic.export_state() {
+                        let proj_val = crate::logic::project_json_value(&st, &paths);
+                        out["projected_state"] = proj_val.clone();
+                        out["state_projection"] = proj_val;
+                    }
+                }
+
+                if include_diff {
+                    let diff_path_prefix = arguments.get("diff_path_prefix").and_then(|v| v.as_str());
+                    let diff_exclude_keys: Vec<String> = if let Some(arr) = arguments.get("diff_exclude_keys").and_then(|v| v.as_array()) {
+                        arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+                    } else {
+                        vec!["chunks".to_string()]
+                    };
+                    let diff_exclude_refs: Vec<&str> = diff_exclude_keys.iter().map(|s| s.as_str()).collect();
+
+                    if let (Some(old_st), Ok(new_st)) = (initial_state, self.logic.export_state()) {
+                        out["state_diff"] = crate::logic::compute_json_diff_scoped(
+                            &old_st,
+                            &new_st,
+                            diff_path_prefix,
+                            Some(&diff_exclude_refs),
+                        );
+                    }
+                }
+
+                (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
+            }
+            "get_state_diff" => {
+                let current_state = match self.logic.export_state() {
+                    Ok(st) => st,
+                    Err(e) => return (format!("Failed to export current world state: {}", e), true),
+                };
+                let old_state = arguments.get("old_state").unwrap_or(&current_state);
+                let new_state = arguments.get("new_state").unwrap_or(&current_state);
+                let path_prefix = arguments.get("path_prefix").and_then(|v| v.as_str());
+                let exclude_keys_vec: Option<Vec<&str>> = arguments
+                    .get("exclude_keys")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect());
+                let diff = crate::logic::compute_json_diff_scoped(
+                    old_state,
+                    new_state,
+                    path_prefix,
+                    exclude_keys_vec.as_deref(),
+                );
+                (serde_json::to_string_pretty(&diff).unwrap_or_else(|_| diff.to_string()), false)
+            }
+            "query_state" => {
+                let Some(paths_arr) = arguments.get("paths").and_then(|v| v.as_array()) else {
+                    return ("Missing required parameter 'paths' (array of strings)".to_string(), true);
+                };
+                let paths: Vec<String> = paths_arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+                let current_state = match self.logic.export_state() {
+                    Ok(st) => st,
+                    Err(e) => return (format!("Failed to export world state: {}", e), true),
+                };
+                let projected = crate::logic::project_json_value(&current_state, &paths);
+                (serde_json::to_string_pretty(&projected).unwrap_or_else(|_| projected.to_string()), false)
+            }
+            "eval_assertion" => {
+                let timeout_ms = arguments.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(1000);
+                if let Some(exprs_val) = arguments.get("exprs").and_then(|v| v.as_array()) {
+                    let exprs: Vec<String> = exprs_val
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    let summary = self.logic.eval_assertions(&exprs, timeout_ms);
+                    (serde_json::to_string_pretty(&summary).unwrap_or_else(|_| summary.to_string()), false)
+                } else if let Some(code) = arguments.get("code").or_else(|| arguments.get("expr")).and_then(|v| v.as_str()) {
+                    match self.logic.eval_assertion(code, timeout_ms) {
+                        Ok(res_val) => {
+                            let is_failure = res_val
+                                .as_object()
+                                .and_then(|obj| obj.get("passed"))
+                                .and_then(|p| p.as_bool())
+                                == Some(false);
+                            let out = if is_failure {
+                                res_val
+                            } else {
+                                serde_json::json!({
+                                    "passed": true,
+                                    "result": res_val,
+                                })
+                            };
+                            (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
+                        }
+                        Err(err) => {
+                            let out = serde_json::json!({
+                                "passed": false,
+                                "error": err,
+                            });
+                            (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
+                        }
+                    }
+                } else {
+                    ("Missing required parameter: provide 'code'/'expr' string or 'exprs' array".to_string(), true)
+                }
+            }
+            "mcp_store_set" => {
+                let Some(key) = arguments.get("key").and_then(|v| v.as_str()) else {
+                    return ("Missing required string parameter 'key'".to_string(), true);
+                };
+                if key.trim().is_empty() {
+                    return ("Parameter 'key' cannot be empty".to_string(), true);
+                }
+                let Some(val) = arguments.get("value") else {
+                    return ("Missing required parameter 'value'".to_string(), true);
+                };
+                let namespace = arguments.get("namespace").and_then(|v| v.as_str());
+                self.mcp_store_set_scoped(namespace, key, val.clone());
+                let (ns, sub) = resolve_namespace_and_key(namespace, key);
+                let out = serde_json::json!({
+                    "success": true,
+                    "namespace": ns,
+                    "key": sub,
+                    "composite_key": format!("{}:{}", ns, sub)
+                });
+                (
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                    false,
+                )
+            }
+            "mcp_store_get" => {
+                let Some(key) = arguments.get("key").and_then(|v| v.as_str()) else {
+                    return ("Missing required string parameter 'key'".to_string(), true);
+                };
+                let namespace = arguments.get("namespace").and_then(|v| v.as_str());
+                let (ns, sub) = resolve_namespace_and_key(namespace, key);
+                let val = self.mcp_store_get_scoped(namespace, key);
+                let found = val.is_some();
+                let out = serde_json::json!({
+                    "found": found,
+                    "namespace": ns,
+                    "key": sub,
+                    "value": val.unwrap_or(serde_json::Value::Null)
+                });
+                (
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                    false,
+                )
+            }
+            "mcp_store_delete" => {
+                let Some(key) = arguments.get("key").and_then(|v| v.as_str()) else {
+                    return ("Missing required string parameter 'key'".to_string(), true);
+                };
+                let namespace = arguments.get("namespace").and_then(|v| v.as_str());
+                let (ns, sub) = resolve_namespace_and_key(namespace, key);
+                let deleted = self.mcp_store_delete_scoped(namespace, key);
+                let out = serde_json::json!({
+                    "success": true,
+                    "deleted": deleted,
+                    "namespace": ns,
+                    "key": sub
+                });
+                (
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                    false,
+                )
+            }
+            "mcp_store_list" => {
+                let prefix = arguments.get("prefix").and_then(|v| v.as_str());
+                let namespace = arguments.get("namespace").and_then(|v| v.as_str());
+                let keys = self.mcp_store_list_scoped(namespace, prefix);
+                let out = serde_json::json!({
+                    "namespace": namespace,
+                    "prefix": prefix,
+                    "count": keys.len(),
+                    "keys": keys
+                });
+                (
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                    false,
+                )
+            }
+            "mcp_store_clear" => {
+                let namespace = arguments.get("namespace").and_then(|v| v.as_str());
+                let count = self.mcp_store_clear_scoped(namespace);
+                let out = serde_json::json!({
+                    "success": true,
+                    "namespace": namespace,
+                    "cleared_count": count
+                });
+                (
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                    false,
+                )
+            }
+            "mcp_store_export" => {
+                if let Some(path_str) = arguments.get("path").and_then(|v| v.as_str()) {
+                    let path = Path::new(path_str);
+                    match self.mcp_store_export_to_file(path) {
+                        Ok(()) => {
+                            let count = self.mcp_storage.read().len();
+                            let out = serde_json::json!({
+                                "success": true,
+                                "path": path_str,
+                                "count": count
+                            });
+                            (
+                                serde_json::to_string_pretty(&out)
+                                    .unwrap_or_else(|_| out.to_string()),
+                                false,
+                            )
+                        }
+                        Err(e) => (
+                            format!("Failed to export MCP store to {}: {}", path_str, e),
+                            true,
+                        ),
+                    }
+                } else {
+                    let guard = self.mcp_storage.read();
+                    let map_val = serde_json::to_value(&*guard).unwrap_or(serde_json::Value::Null);
+                    let out = serde_json::json!({
+                        "count": guard.len(),
+                        "data": map_val
+                    });
+                    (
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                        false,
+                    )
+                }
+            }
+            "mcp_store_import" => {
+                let overwrite = arguments
+                    .get("overwrite")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                if let Some(path_str) = arguments.get("path").and_then(|v| v.as_str()) {
+                    let path = Path::new(path_str);
+                    match self.mcp_store_import_from_file(path, overwrite) {
+                        Ok(count) => {
+                            let out = serde_json::json!({
+                                "success": true,
+                                "path": path_str,
+                                "imported_count": count
+                            });
+                            (
+                                serde_json::to_string_pretty(&out)
+                                    .unwrap_or_else(|_| out.to_string()),
+                                false,
+                            )
+                        }
+                        Err(e) => (
+                            format!("Failed to import MCP store from {}: {}", path_str, e),
+                            true,
+                        ),
+                    }
+                } else if let Some(serde_json::Value::Object(map)) = arguments.get("data") {
+                    let mut imported_count = 0;
+                    let mut guard = self.mcp_storage.write();
+                    for (k, v) in map {
+                        if overwrite || !guard.contains_key(k) {
+                            guard.insert(k.clone(), v.clone());
+                            imported_count += 1;
+                        }
+                    }
+                    let out = serde_json::json!({
+                        "success": true,
+                        "imported_count": imported_count
+                    });
+                    (
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()),
+                        false,
+                    )
+                } else {
+                    (
+                        "Missing required parameter: either 'path' or 'data'".to_string(),
+                        true,
+                    )
+                }
+            }
             _ => match self.logic.mcp_call_tool(name, arguments) {
                 Ok(val) => {
                     let is_err = val
@@ -1010,6 +2005,14 @@ impl TextCraftServer {
             {
                 if let Err(e) = self.logic.save_state_to_file() {
                     tracing::error!(error = %e, "Autosave failed");
+                }
+                if let Some(save_path) = self.logic.save_file() {
+                    if !self.mcp_storage.read().is_empty() {
+                        let mcp_path = save_path.with_extension("mcp.json");
+                        if let Err(e) = self.mcp_store_export_to_file(&mcp_path) {
+                            tracing::error!(error = %e, "MCP storage autosave failed");
+                        }
+                    }
                 }
                 last_autosave = now;
             }

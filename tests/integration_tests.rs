@@ -371,6 +371,7 @@ async fn test_4_player_movement_updates_ansi_screen() {
         shift: false,
         ctrl: false,
         alt: false,
+        action: Default::default(),
     });
     ws_stream
         .send(Message::Text(DualCodec::encode_text(&move_cmd).unwrap()))
@@ -611,6 +612,7 @@ fn test_6_scheme_dynamic_fps_query_and_adaptive_scheduler() {
         shift: false,
         ctrl: false,
         alt: false,
+        action: Default::default(),
     };
     logic.on_input(1, &key).expect("input should succeed");
     let fps_wake = logic.query_target_fps();
