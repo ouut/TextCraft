@@ -833,7 +833,7 @@ async fn test_8_state_persistence_shutdown_and_restart() {
         assert_eq!(exported["players"]["42"]["y"], 5);
 
         // Verify that snapshot renders from restored state
-        let snap = server2.logic.render_snapshot(42).unwrap();
+        let snap = server2.logic.render_snapshot(42).unwrap().unwrap();
         assert_eq!(snap.hud["gold"], 888);
 
         server2.handle.shutdown();

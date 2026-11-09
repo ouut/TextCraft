@@ -6,9 +6,23 @@
 (define *chunk-size* 16)
 (define *esc* "\x1b;")
 (define *ansi-reset* (string-append *esc* "[0m"))
-(define *visual-version* 1)
+;; ----------------------------------------------------------------------------
+;; Pure Scheme Dirty Tracking
+;; ----------------------------------------------------------------------------
+
+(define *world-dirty-version* 1)
+
+(define (bump-world-dirty-version!)
+  (set! *world-dirty-version* (+ *world-dirty-version* 1)))
+
 (define (bump-visual-version!)
-  (set! *visual-version* (+ *visual-version* 1)))
+  (bump-world-dirty-version!))
+
+(define (player:mark-dirty! player-id)
+  (let ((p (get-player player-id)))
+    (if p
+        (set-player player-id (hash-insert p "dirty" #t))
+        #f)))
 
 ;; ----------------------------------------------------------------------------
 ;; Generic Helpers
@@ -209,6 +223,8 @@
       "identity_key" id-key
       "name" display-name
       "online" #t
+      "dirty" #t
+      "last_rendered_ver" 0
       "theme" "cyberpunk"
       "double_width" #f
       "x" 0
@@ -246,12 +262,16 @@
 (define (set-player player-id player-map)
   (let* ((pid-key (to-string player-id))
          (players (map-get *world-state* "players" (hash)))
-         (new-players (hash-insert players pid-key player-map))
+         ;; Ensure player has dirty=#t unless explicitly marked false
+         (pm (if (hash-contains? player-map "dirty")
+                 player-map
+                 (hash-insert player-map "dirty" #t)))
+         (new-players (hash-insert players pid-key pm))
          (ws1 (hash-insert *world-state* "players" new-players))
-         (id-key (player-identity-key player-map)))
+         (id-key (player-identity-key pm)))
     (if (and (string? id-key) (not (string=? id-key "")))
         (let* ((saved (map-get ws1 "saved_players" (hash)))
-               (new-saved (hash-insert saved id-key player-map)))
+               (new-saved (hash-insert saved id-key pm)))
           (set! *world-state* (hash-insert ws1 "saved_players" new-saved)))
         (set! *world-state* ws1))
     (bump-visual-version!)))

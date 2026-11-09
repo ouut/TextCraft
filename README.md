@@ -181,7 +181,7 @@ cargo run -- --port 8081 --mcp-port 8082 -w --log-level debug
 | `--admin-token <token>` | `admin_token` | `String` | `admin` | 管理员认证 Token。在游戏控制台输入以 `!` 开头的指令进行 REPL 求值 |
 | `--save-file <path>` | `save_file` | `PathBuf` | `None` | 世界纯数据状态存档路径（原子保存与断点恢复；未指定则不落盘） |
 | `--autosave-sec <sec>` | `autosave_sec` | `u64` | `30` | 自动定时存档周期（单位：秒；设为 `0` 时禁用自动存档） |
-| `--snapshot-heartbeat-ms <ms>` | `snapshot_heartbeat_ms` | `u64` | `1000` | 快照保活心跳周期（毫秒；静止状态去重跳过，达到周期强制推流保活；设为 `0` 禁用去重） |
+| `--snapshot-heartbeat-ms <ms>` | `snapshot_heartbeat_ms` | `u64` | `1000` | 快照保活心跳周期（毫秒；未变脏时跳过推流，达到周期时使用缓存快照保活重发；设为 `0` 禁用去重） |
 | `-h, --help` | - | - | - | 打印命令行帮助信息与选项详情 |
 | `-V, --version` | - | - | - | 打印当前 TextCraft 版本号 (`3.0.0`) |
 

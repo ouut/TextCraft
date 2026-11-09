@@ -1,6 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -211,44 +209,11 @@ pub struct TextCraftServer {
     pub autosave_sec: u64,
     pub snapshot_heartbeat_ms: u64,
     pub log_level: LogLevel,
-    last_snapshots: HashMap<PlayerId, (u64, Instant, u64, PlayerSnapshot)>,
+    last_snapshots: HashMap<PlayerId, (Instant, PlayerSnapshot)>,
     player_tokens: HashMap<PlayerId, String>,
     last_reload_check: Option<Instant>,
     mcp_rx: Option<tokio::sync::mpsc::UnboundedReceiver<McpRequestMsg>>,
     mcp_addr: Option<SocketAddr>,
-}
-
-fn hash_json_value<H: Hasher>(val: &serde_json::Value, state: &mut H) {
-    match val {
-        serde_json::Value::Null => 0u8.hash(state),
-        serde_json::Value::Bool(b) => {
-            1u8.hash(state);
-            b.hash(state);
-        }
-        serde_json::Value::Number(n) => {
-            2u8.hash(state);
-            n.hash(state);
-        }
-        serde_json::Value::String(s) => {
-            3u8.hash(state);
-            s.hash(state);
-        }
-        serde_json::Value::Array(arr) => {
-            4u8.hash(state);
-            arr.len().hash(state);
-            for item in arr {
-                hash_json_value(item, state);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            5u8.hash(state);
-            map.len().hash(state);
-            for (k, v) in map {
-                k.hash(state);
-                hash_json_value(v, state);
-            }
-        }
-    }
 }
 
 impl TextCraftServer {
@@ -520,81 +485,35 @@ impl TextCraftServer {
         }
 
         // 7. Render and broadcast snapshots for each online player
-        let current_ver = self.logic.visual_version();
         for pid in self.handle.connected_players() {
-            if self.snapshot_heartbeat_ms > 0 {
-                if let Some(&(_, last_sent, last_ver, _)) = self.last_snapshots.get(&pid) {
-                    if last_ver == current_ver {
-                        if now.duration_since(last_sent)
+            match self.logic.render_snapshot(pid) {
+                Ok(Some(new_snapshot)) => {
+                    tracing::trace!(player_id = pid, "Sending updated snapshot to player");
+                    self.last_snapshots.insert(pid, (now, new_snapshot.clone()));
+                    self.handle.send_snapshot(pid, new_snapshot);
+                }
+                Ok(None) => {
+                    // Scheme declared no visual changes for this player
+                    if self.snapshot_heartbeat_ms == 0 {
+                        // Deduplication disabled: re-send cached snapshot if present
+                        if let Some((_, cached_snap)) = self.last_snapshots.get(&pid) {
+                            self.handle.send_snapshot(pid, cached_snap.clone());
+                        }
+                    } else if let Some((last_sent, cached_snap)) = self.last_snapshots.get_mut(&pid) {
+                        if now.duration_since(*last_sent)
                             >= Duration::from_millis(self.snapshot_heartbeat_ms)
                         {
-                            if let Some(entry) = self.last_snapshots.get_mut(&pid) {
-                                entry.1 = now;
-                                let snap = entry.3.clone();
-                                tracing::trace!(
-                                    player_id = pid,
-                                    visual_version = current_ver,
-                                    "Sending periodic heartbeat snapshot"
-                                );
-                                self.handle.send_snapshot(pid, snap);
-                            }
+                            *last_sent = now;
+                            let snap = cached_snap.clone();
+                            tracing::trace!(
+                                player_id = pid,
+                                "Sending periodic heartbeat snapshot"
+                            );
+                            self.handle.send_snapshot(pid, snap);
                         } else {
                             tracing::trace!(
                                 player_id = pid,
-                                visual_version = current_ver,
-                                "Skipping unchanged snapshot (visual version unchanged)"
-                            );
-                        }
-                        continue;
-                    }
-                }
-            }
-
-            match self.logic.render_snapshot(pid) {
-                Ok(snapshot) => {
-                    if self.snapshot_heartbeat_ms == 0 {
-                        tracing::trace!(
-                            player_id = pid,
-                            visual_version = current_ver,
-                            "Sending snapshot (deduplication disabled)"
-                        );
-                        self.handle.send_snapshot(pid, snapshot);
-                    } else {
-                        let mut hasher = DefaultHasher::new();
-                        snapshot.cols.hash(&mut hasher);
-                        snapshot.rows.hash(&mut hasher);
-                        snapshot.screen.hash(&mut hasher);
-                        hash_json_value(&snapshot.hud, &mut hasher);
-                        let current_hash = hasher.finish();
-
-                        let now_after_render = Instant::now();
-                        let should_send = match self.last_snapshots.get(&pid) {
-                            None => true,
-                            Some(&(last_hash, last_sent, _, _)) => {
-                                current_hash != last_hash
-                                    || now_after_render.duration_since(last_sent)
-                                        >= Duration::from_millis(self.snapshot_heartbeat_ms)
-                            }
-                        };
-
-                        if should_send {
-                            tracing::trace!(
-                                player_id = pid,
-                                visual_version = current_ver,
-                                hash = current_hash,
-                                "Sending updated snapshot to player"
-                            );
-                            self.last_snapshots.insert(
-                                pid,
-                                (current_hash, now_after_render, current_ver, snapshot.clone()),
-                            );
-                            self.handle.send_snapshot(pid, snapshot);
-                        } else if let Some(entry) = self.last_snapshots.get_mut(&pid) {
-                            entry.2 = current_ver;
-                            tracing::trace!(
-                                player_id = pid,
-                                visual_version = current_ver,
-                                "Skipping snapshot (content hash unchanged)"
+                                "Skipping unchanged snapshot (Scheme not dirty, heartbeat within window)"
                             );
                         }
                     }
@@ -635,6 +554,11 @@ impl TextCraftServer {
                 }
             }
         }
+    }
+
+    /// Returns the last cached snapshot for a player, if any.
+    pub fn last_snapshot(&self, pid: PlayerId) -> Option<&PlayerSnapshot> {
+        self.last_snapshots.get(&pid).map(|(_, snap)| snap)
     }
 
     /// Checks whether a player holds admin REPL authorization.
@@ -895,7 +819,8 @@ impl TextCraftServer {
                         return (err, true);
                     }
                     match self.logic.render_snapshot(pid) {
-                        Ok(snap) => {
+                        Ok(Some(snap)) => {
+                            self.last_snapshots.insert(pid, (Instant::now(), snap.clone()));
                             let out = serde_json::json!({
                                 "player_id": pid,
                                 "command": trimmed,
@@ -909,6 +834,26 @@ impl TextCraftServer {
                                     .unwrap_or_else(|_| out.to_string()),
                                 false,
                             )
+                        }
+                        Ok(None) => {
+                            let snap = self.last_snapshots.get(&pid).map(|(_, s)| s.clone());
+                            if let Some(snap) = snap {
+                                let out = serde_json::json!({
+                                    "player_id": pid,
+                                    "command": trimmed,
+                                    "ascii_screen": strip_ansi_codes(&snap.screen),
+                                    "cols": snap.cols,
+                                    "rows": snap.rows,
+                                    "hud": snap.hud,
+                                });
+                                (
+                                    serde_json::to_string_pretty(&out)
+                                        .unwrap_or_else(|_| out.to_string()),
+                                    false,
+                                )
+                            } else {
+                                ("No snapshot available".to_string(), false)
+                            }
                         }
                         Err(err) => (err, true),
                     }
@@ -969,7 +914,8 @@ impl TextCraftServer {
                 };
                 self.process_player_input(pid, input);
                 match self.logic.render_snapshot(pid) {
-                    Ok(snap) => {
+                    Ok(Some(snap)) => {
+                        self.last_snapshots.insert(pid, (Instant::now(), snap.clone()));
                         let out = serde_json::json!({
                             "player_id": pid,
                             "ascii_screen": strip_ansi_codes(&snap.screen),
@@ -982,6 +928,25 @@ impl TextCraftServer {
                                 .unwrap_or_else(|_| out.to_string()),
                             false,
                         )
+                    }
+                    Ok(None) => {
+                        let snap = self.last_snapshots.get(&pid).map(|(_, s)| s.clone());
+                        if let Some(snap) = snap {
+                            let out = serde_json::json!({
+                                "player_id": pid,
+                                "ascii_screen": strip_ansi_codes(&snap.screen),
+                                "cols": snap.cols,
+                                "rows": snap.rows,
+                                "hud": snap.hud,
+                            });
+                            (
+                                serde_json::to_string_pretty(&out)
+                                    .unwrap_or_else(|_| out.to_string()),
+                                false,
+                            )
+                        } else {
+                            ("No snapshot available".to_string(), false)
+                        }
                     }
                     Err(err) => (err, true),
                 }

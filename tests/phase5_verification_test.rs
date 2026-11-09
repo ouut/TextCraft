@@ -388,7 +388,7 @@ fn test_task_5_2_merchant_dialog_contract_and_actions() {
 
     // 1. Interact with merchant -> verify dialog object structure
     logic.on_input(1, &move_north).unwrap();
-    let snap = logic.render_snapshot(1).unwrap();
+    let snap = logic.render_snapshot(1).unwrap().expect("snapshot should be dirty after moving");
     let dialog = &snap.hud["dialog"];
     assert!(
         dialog.is_object(),
@@ -414,7 +414,7 @@ fn test_task_5_2_merchant_dialog_contract_and_actions() {
 
     // 2. Test "buy_potion" UI action: deducts 25 gold (50 -> 25), increments potion count (3 -> 4), closes dialog
     logic.on_ui_action(1, "buy_potion", &json!(null)).unwrap();
-    let snap_after_buy = logic.render_snapshot(1).unwrap();
+    let snap_after_buy = logic.render_snapshot(1).unwrap().expect("snapshot should be dirty after buy_potion");
     assert_eq!(snap_after_buy.hud["gold"], 25, "Buying potion should deduct 25 gold");
     assert_eq!(
         snap_after_buy.hud["dialog"],
@@ -433,7 +433,7 @@ fn test_task_5_2_merchant_dialog_contract_and_actions() {
     for close_action in ["dialog_close", "close_dialog", "dialog_confirm"] {
         // Re-open dialog by interacting with Merchant
         logic.on_input(1, &move_north).unwrap();
-        let snap_open = logic.render_snapshot(1).unwrap();
+        let snap_open = logic.render_snapshot(1).unwrap().expect("snapshot should be dirty after moving north");
         assert!(
             snap_open.hud["dialog"].is_object(),
             "Dialog should be open before testing {}",
@@ -442,7 +442,7 @@ fn test_task_5_2_merchant_dialog_contract_and_actions() {
 
         // Send close action
         logic.on_ui_action(1, close_action, &json!(null)).unwrap();
-        let snap_closed = logic.render_snapshot(1).unwrap();
+        let snap_closed = logic.render_snapshot(1).unwrap().expect("snapshot should be dirty after closing dialog");
         assert_eq!(
             snap_closed.hud["dialog"],
             json!(false),
@@ -466,7 +466,7 @@ fn test_task_5_2_ui_sync_and_say_broadcast() {
     logic
         .on_ui_action(1, "set_theme", &json!({ "theme": "amber" }))
         .unwrap();
-    let snap1 = logic.render_snapshot(1).unwrap();
+    let snap1 = logic.render_snapshot(1).unwrap().expect("snapshot should be dirty after set_theme");
     assert_eq!(snap1.hud["theme"], "amber");
 
     // 2. Test "clear_logs" UI action
@@ -475,7 +475,7 @@ fn test_task_5_2_ui_sync_and_say_broadcast() {
         "Logs should not be empty initially"
     );
     logic.on_ui_action(1, "clear_logs", &json!(null)).unwrap();
-    let snap1_cleared = logic.render_snapshot(1).unwrap();
+    let snap1_cleared = logic.render_snapshot(1).unwrap().expect("snapshot should be dirty after clear_logs");
     assert!(
         snap1_cleared.hud["logs"].as_array().unwrap().is_empty(),
         "clear_logs should empty player 1's logs"
@@ -487,7 +487,7 @@ fn test_task_5_2_ui_sync_and_say_broadcast() {
 
     // Check both Player 1 and Player 2 have the chat message in their HUD logs
     for pid in [1, 2] {
-        let snap = logic.render_snapshot(pid).unwrap();
+        let snap = logic.render_snapshot(pid).unwrap().expect("snapshot should be dirty after say");
         let has_chat = snap.hud["logs"].as_array().unwrap().iter().any(|entry| {
             entry["channel"] == "chat"
                 && entry["text"]
@@ -628,7 +628,7 @@ async fn test_task_5_1_multi_user_url_token_routing_and_offline_ghost_filtering(
     tokio::time::sleep(Duration::from_millis(30)).await;
     server.tick(0.016).unwrap();
 
-    let snap_alice_with_bob_online = server.logic.render_snapshot(alice_id).unwrap();
+    let snap_alice_with_bob_online = server.last_snapshot(alice_id).expect("Alice snapshot should have been rendered and cached during tick");
     assert!(
         snap_alice_with_bob_online
             .screen
@@ -649,7 +649,7 @@ async fn test_task_5_1_multi_user_url_token_routing_and_offline_ghost_filtering(
     );
 
     // Verify Bob's offline ghost is immediately hidden from Alice's viewport!
-    let snap_alice_with_bob_offline = server.logic.render_snapshot(alice_id).unwrap();
+    let snap_alice_with_bob_offline = server.last_snapshot(alice_id).expect("Alice snapshot should have been rendered and cached during tick");
     assert!(
         !snap_alice_with_bob_offline
             .screen
@@ -763,7 +763,7 @@ async fn test_task_5_3_ansi_rle_compactness_and_10_players_tick_benchmark() {
 
     // 1. Verify ANSI RLE compactness on a standard 80x24 viewport (1920 cells)
     logic.on_player_join(100, "bench_inspector").unwrap();
-    let snap = logic.render_snapshot(100).unwrap();
+    let snap = logic.render_snapshot(100).unwrap().expect("snapshot should be dirty after join");
     let screen_bytes = snap.screen.len();
     let reset_count = snap.screen.matches("\x1b[0m").count();
 

@@ -47,8 +47,8 @@ flowchart TD
 
 1. **纯数据世界状态（Pure Data Only）**：
    全局世界状态保存在 `*world-state*` 哈希表中。其中所有数据必须为**可 JSON 序列化的纯数据**（哈希表、列表、整数、浮点数、字符串、布尔值）。**严禁在 `*world-state*` 中存储 Lambda 闭包或函数引用**，以保障热重载状态恢复与磁盘存档 100% 成功。
-2. **脏版本标记（Dirty Version Tracking）**：
-   引擎内置 `*visual-version*` 计数器。任何修改地图瓦片、玩家属性或双宽模式的操作都会调用 `(bump-visual-version!)`。当版本未变且未到心跳周期时，Rust 宿主会**直接跳过 `render-snapshot` 光栅化**（静止帧开销 `< 0.05ms`）。如果你直接通过 `set!` 修改了影响画面的自定义全局状态，请务必调用 `(bump-visual-version!)`。
+2. **脏标记只读检测（Scheme-Authoritative Dirty Check）**：
+   快照脏检测完全由 Scheme 权威自治。`scripts/main.scm` 中的 `(engine:render-snapshot pid)` 在玩家视口与 HUD 未发生变化时直接返回 `#f`（类似 HTTP 304 Not Modified），彻底省去昂贵的 ANSI 视口光栅化与哈希计算开销；当玩家移动、受到伤害、或者周围世界发生变更时，Scheme 自动标记脏状态并生成最新的 `Snapshot` 字典返回。Rust 宿主在收到 `#f` 时零计算跳过本帧网络推流，或在心跳超时时使用已缓存的快照保活重发。
 3. **分层瓦片与 ANSI RLE 光栅化**：
    世界分为 4 个渲染图层：`terrain`（底层地形）、`surface`（地表物品/设施）、`actor`（生物/NPC/其他玩家）、`overlay`（顶层特效）。`render-viewport-ansi` 会自动合并同行连续相同颜色的 ANSI 转义码（RLE 压缩），大幅降低网络带宽与 DOM 解析开销。
 4. **前后端纯数据契约（Pure JSON HUD Contract）**：
@@ -250,7 +250,7 @@ Rust 宿主在 Scheme 全局环境中注册了 4 个原生函数，任何脚本�
 | `(engine:on-input pid input-map)` | 主循环第 3/4 阶段 | 处理键盘按键（`"type": "key"`）与视口鼠标点击（`"type": "mouse"`），重置空闲计时器 |
 | `(engine:on-ui-action pid action-map)`| 主循环第 3/4 阶段 | 处理前端 HUD 发送的交互动作（如 `"use_item"`, `"buy_potion"`, `"close_dialog"`, `"clear_logs"`） |
 | `(engine:on-command pid datum raw)` | 主循环第 4 阶段 | 处理玩家输入的控制台命令（`datum` 已由宿主安全 Reader 预解析为 S-表达式，零代码注入风险） |
-| `(engine:render-snapshot pid)` | 主循环第 7 阶段 | 返回 `(hash "screen" ansi-str "cols" cols "rows" rows "hud" hud-map)` |
+| `(engine:render-snapshot pid)` | 主循环第 7 阶段 | Scheme 权威快照生成与脏检测。未变脏返回 `#f`（跳过光栅化），变脏时返回 `(hash "screen" ansi-str "cols" cols "rows" rows "hud" hud-map)` |
 | `(engine:export-state)` | 自动存档/热重载前 | 返回 `*world-state*` |
 | `(engine:import-state data)` | 启动读档/热重载后 | 将 `data` 恢复至 `*world-state*` 并调用 `(bump-visual-version!)` |
 
@@ -263,7 +263,7 @@ Rust 宿主在 Scheme 全局环境中注册了 4 个原生函数，任何脚本�
 服务端通过 WebSocket 发送两类数据包：
 
 #### 1. 状态快照信封 (`Snapshot`)
-当 `*visual-version*` 发生变更且结构化 Hash 变化（或到达 `--snapshot-heartbeat-ms` 保活周期）时推送：
+当 Scheme 检测到视口或 HUD 变脏并返回新快照时立即推送（若未变脏返回 `#f`，则在达到 `--snapshot-heartbeat-ms` 保活周期时使用缓存重发）：
 ```json
 {
   "Snapshot": {
