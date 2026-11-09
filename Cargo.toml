@@ -1,8 +1,8 @@
 [package]
 name = "textcraft"
-version = "3.0.0"
+version = "5.0.0"
 edition = "2021"
-description = "TextCraft 3.0: High performance multiplayer Hybrid UI terminal engine powered by Scheme and Rust"
+description = "TextCraft 5.0: High performance multiplayer ECS and Hybrid UI terminal engine powered by Scheme, Flecs, and Rust"
 
 [lib]
 name = "textcraft"

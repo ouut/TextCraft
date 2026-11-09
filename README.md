@@ -1,17 +1,18 @@
-# TextCraft 4.0
+# TextCraft 5.0
 
-TextCraft 4.0 是基于 **Flecs ECS C-Core 状态底座**、**嵌入式 Scheme（Steel）动态脚本层** 与 **原生高性能 ANSI 光栅化器** 的现代化多人 Roguelike 游戏引擎。
+TextCraft 5.0 是基于 **Flecs ECS C-Core 状态底座**、**嵌入式 Scheme（Steel）动态脚本层**、**原生高性能 ANSI 光栅化器** 与 **Agent 自动驾驶仿真引擎** 的现代化多人涌现式 Roguelike 游戏引擎。
 
-在 4.0 架构中，系统实现了从纯解释型不可变状态到“工业级 ECS + 动态逻辑”的跨越式升级：
-- **Flecs 权威状态底座（Authoritative Flecs ECS）**：底层采用工业级 Flecs C-Core ECS 管理实体拓扑、标签与关系（如 `PartOf`、`EquippedOn`、`CoveredWith`），结合 `SpatialGrid`（基于 `FxHashMap` 的亚纳秒级坐标哈希）实现超十万实体的毫秒级查询与空间检索。
+在 5.0 架构中，系统实现了工业级性能与极客自由度的完美统一：
+- **Flecs 权威状态底座（Authoritative Flecs ECS）**：底层采用工业级 Flecs C-Core ECS 管理实体拓扑、标签与关系（如 `PartOf`、`EquippedOn`、`CoveredWith`、`PlayerSession`），结合 `SpatialGrid`（基于 `FxHashMap` 的亚纳秒级坐标哈希）实现超十万实体的微秒级查询与空间检索。
 - **原生 ANSI 零拷贝光栅化（Native Sub-5μs Rasterizer）**：将传统脚本层逐格字符串拼接与哈希查找下沉至 Rust 热路径，运用基于颜色状态机的 ANSI RLE 渲染管道，在 10,000+ 实体的大地图中实现 80×24 视口单帧 **4.53 μs** 极速渲染（性能预算 `< 30 μs`）。
 - **通用 Roguelike 数学密集算子（Universal Math Operators）**：下沉视野投射（对偶对称阴影投射 Symmetric Recursive Shadowcasting）、A* 网格寻路（防穿墙与步数截断）、全图 BFS Dijkstra 势能场、Simplex 确定性噪声与元胞自动机洞窟扩散算子至 Rust，以 `(ecs:fov ...)` 等优雅原语无缝暴露给 Scheme。
 - **类《Caves of Qud》深度涌现机制（Qud Emergence in Pure Scheme）**：100% 纯 Scheme 免编译脚本实现解剖学多肢体树与断肢掉落 (`scripts/anatomy.scm`)、液体热力学相变与酸蚀灭火反应 (`scripts/chemistry.scm`)、多臂/灼热双掌等物理精神变异 (`scripts/mutation.scm`) 以及深度洞窟与盐沼生态生成 (`scripts/worldgen.scm`)。
-- **AI 智能体全透视与在线运维（MCP Tools for AI Agents）**：基于 Model Context Protocol (MCP) JSON-RPC 2.0，提供 `ecs_inspect`、`ecs_query` 与 `ecs_modify` 工具，允许 AI Agent 实时查询实体图谱、修改属性、调试变异与世界状态。
+- **Agent 自动驾驶引擎与无头虚拟推演（Agent Self-Driving & Headless Sim）**：内置无头虚拟时钟步进 (`simulate_steps`)、确定性随机种子 (`seed-prng`)、状态路径掩码投影 (`query_state`)、作用域状态差分 (`state_diff`)、批量自动化断言 (`assert_state`) 与跨回合专用记忆黑板 (`mcp_storage_*`)，全面赋能 AI 智能体自动化回归与时空推演。
+- **AI 智能体全透视与在线运维（MCP Tools for AI Agents）**：基于 Model Context Protocol (MCP) JSON-RPC 2.0，提供 `ecs_inspect`、`ecs_query` 与 `ecs_modify` 等权威 ECS 操作工具，并支持通过 `(mcp:def-tool ...)` 在运行期零编译自举扩展全新业务工具。
 
 ---
 
-## 1. 架构拓扑 (TextCraft 4.0 Architecture)
+## 1. 架构拓扑 (TextCraft 5.0 Architecture)
 
 ```mermaid
 flowchart TD
@@ -20,18 +21,21 @@ flowchart TD
         HUD_Top["HTML/CSS 状态栏 (血条/法力条/等级/金币 - CSS 变量微秒刷新)"]
         PreScreen["<pre id='screen'> 核心视口 (动态等宽字号自适应，24-bit ANSI 流)"]
         HUD_Sides["HTML/CSS 浮动面板 (肢体状态/变异技能/液体沾染/背包)"]
-        InputHandler["原生键盘与鼠标事件捕获 (WASD/移动/交互)"]
+        InputHandler["原生键盘/鼠标事件捕获 + visibilitychange 切后台自动唤醒 Ping"]
     end
 
     subgraph Host["Rust 宿主与状态底座 (High-Performance Host)"]
-        Gateway["Axum HTTP + WebSocket 高并发网关"]
-        MCP["MCP JSON-RPC 2.0 服务端 (ecs_inspect / ecs_query / ecs_modify)"]
+        Gateway["Axum HTTP + WebSocket 高并发网关 (--web-dir 本地资产优先探测)"]
+        MCP["MCP JSON-RPC 2.0 服务端 (:8082 /mcp)"]
+        Blackboard["McpStorage (智能体专用跨回合隔离记忆黑板)"]
+        VirtualClock["虚拟时钟推演调度器 (simulate_steps / pause / resume)"]
         Flecs["Flecs ECS 权威底座 (GridPos, VisualGlyph, DynamicProps, 标签与关系图)"]
         Spatial["SpatialGrid (FxHashMap 空间哈希与图层索引)"]
         Rasterizer["ViewportRasterizer (ANSI RLE 状态机，4.53 μs/帧)"]
         Operators["数学算子 (FOV / A* / Dijkstra / Simplex Noise / 元胞自动机)"]
         Flecs <--> Spatial
         Spatial --> Rasterizer
+        MCP <--> Blackboard & VirtualClock & Flecs
     end
 
     subgraph Logic["Scheme 动态业务脚本 (Steel Scheme VM)"]
@@ -39,7 +43,7 @@ flowchart TD
         Chemistry["chemistry.scm: 液体池(水/酸/火/油/血/蒸汽)、热力学与反应"]
         Mutation["mutation.scm: 物理/精神变异 (多臂异化、灼热双掌、空间折跃)"]
         WorldGen["worldgen.scm: 洞窟地牢、盐沼废墟与生态种群生成"]
-        LogicFFI["ecs:* FFI 原语与语法宏"]
+        LogicFFI["ecs:* FFI 原语、mcp-store 黑板原语与语法宏"]
     end
 
     InputHandler --> Gateway
@@ -48,21 +52,20 @@ flowchart TD
     Operators --> LogicFFI
     Flecs --> Rasterizer --> PreScreen
     Logic --> HUD_Top & HUD_Sides
-    MCP <--> Flecs
 ```
 
 ---
 
-## 2. 性能实测指标 (v4.0 Benchmarks)
+## 2. 性能实测指标 (v5.0 Benchmarks)
 
-基于真实机器实测数据 (`cargo test --release --test phase5_scale_benchmark`)：
+基于真实机器实测数据 (`cargo test --release`)：
 
-| 评测维度 | v4.0 实测成绩 | 目标性能预算 | 提升幅度 |
+| 评测维度 | v5.0 实测成绩 | 目标性能预算 | 达成状态 |
 | :--- | :--- | :--- | :--- |
 | **80×24 ANSI 视口单帧光栅化** | **4.53 μs** | `< 30.00 μs` | **6.6x 超额达标** |
 | **10,000+ 活跃实体生成吞吐量** | **1,667,979 实体/秒** (6.30 ms) | `> 50,000 实体/秒` | **33x 超额达标** |
 | **10,000+ 实体主循环 Tick 推进** | **0.49 μs/tick** (60 ticks 29.5 μs) | `< 1,000 μs/tick` | **亚微秒级** |
-| **测试套件全覆盖** | **78 / 78 (100% 通过)** | 100% | **通过** |
+| **全套自动化测试回归** | **96 / 96 (100% 通过)** | 100% | **全部通过** |
 | **静态分析代码质量** | `cargo clippy --all-targets` 0 告警 | 0 告警 | **完美通过** |
 
 ---
@@ -71,7 +74,7 @@ flowchart TD
 
 ```text
 TextCraft/
-  ├── Cargo.toml                    # 极简单一 Crate 配置 (textcraft v4.0.0)
+  ├── Cargo.toml                    # 极简单一 Crate 配置 (textcraft v5.0.0)
   ├── src/                          # 宿主核心源码 (Tokio + Axum + Steel VM + Flecs)
   │   ├── lib.rs                    # 核心导出、集成测试入口
   │   ├── main.rs                   # 服务端独立入口
@@ -80,14 +83,13 @@ TextCraft/
   │   ├── render/                   # ViewportRasterizer 原生 ANSI RLE 光栅化
   │   ├── operators/                # Roguelike 数学密集算子 (FOV / A* / Dijkstra / Noise / Cave)
   │   ├── logic/                    # Scheme VM 封装、热重载、看门狗与 ecs_* FFI 原语绑定
-  │   ├── runtime.rs                # Axum HTTP + WebSocket 网关、自适应变频主循环
-  │   ├── mcp.rs                    # MCP JSON-RPC 2.0 服务端与工具透视 (ecs_inspect/query/modify)
-  │   └── types.rs                  # 传输层极简协议 (PlayerInput, PlayerSnapshot, Event)
+  │   ├── runtime.rs                # Axum HTTP + WebSocket 网关、自适应变频主循环、MCP 服务端
+  │   └── types.rs                  # 传输层通信协议、MCP 存储黑板数据结构与序列化
   ├── web/
   │   └── index.html                # 极简 Hybrid Web 客户端 (内置 window.TextCraft SDK 与基础 HUD)
-  ├── tests/                        # 集成测试与规模化性能基准
+  ├── tests/                        # 全量集成测试、无头仿真测试与规模化性能基准 (96 项测试)
   ├── scripts/                      # Steel Scheme 动态脚本层 (自动按序加载)
-  │   ├── prelude.scm               # 常量图层、分块兼容、ECS DSL 宏与 HUD 工具
+  │   ├── prelude.scm               # 常量图层、分块兼容、ECS DSL 宏、黑板绑定与 HUD 工具
   │   ├── anatomy.scm               # 解剖学多肢体系统与暴击断肢掉落
   │   ├── chemistry.scm             # 液体池热力学相变与元素化学反应
   │   ├── mutation.scm              # 物理/精神变异与主动能力系统
@@ -97,14 +99,16 @@ TextCraft/
   ├── build.ps1                     # 本地打包脚本 (Windows PowerShell)
   └── docs/
       ├── develop/
-      │   ├── scheme_developer_guide.md # Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南 (v4.0 核心)
-      │   ├── agent_developer_guide.md  # 游戏 (Scheme) 与前端 (HUD SDK) Agent 开发者综合指南
-      │   └── mcp_developer_guide.md    # MCP (Model Context Protocol) 开发者与 AI 协同开发指南
+      │   ├── scheme_developer_guide.md      # Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南 (v5.0 核心)
+      │   ├── agent_developer_guide.md       # 游戏 (Scheme) 与前端 (HUD SDK) Agent 开发者综合指南
+      │   ├── mcp_developer_guide.md         # MCP (Model Context Protocol) 开发者与 AI 协同开发指南
+      │   ├── steel_scheme_reference.md      # Steel Scheme 0.8.3 内置标准库与核心函数参考手册
+      │   └── steel_scheme_best_practices.md # Steel Scheme 代码开发最佳实践
       └── project/                  # 本项目（引擎宿主）开发文档
-          ├── v4.0_architecture_and_roadmap.md # v4.0 双引擎架构与演进路线图
-          ├── specification_3.0.0.md # 引擎 3.0 架构与技术规范
-          ├── agents_3.0.0.md       # 引擎开发多智能体协作规范
-          └── changelog.md          # 版本演进与架构变更日志
+          ├── v4.0_architecture_and_roadmap.md # v4.0 双引擎架构与演进路线图 (已 100% 达成)
+          ├── specification_3.0.0.md           # 引擎 3.0 架构与技术规范 (历史归档)
+          ├── agents_3.0.0.md                  # 引擎开发多智能体协作规范 (历史归档)
+          └── changelog.md                     # 版本演进与架构变更日志 (v3.0.0 -> v5.0.0)
 ```
 
 ---
@@ -122,7 +126,7 @@ cd TextCraft
 ### 3.2 编译与测试
 
 ```bash
-# 运行全套单元测试与端到端集成测试 (10 个单元测试 + 10 个端到端集成测试)
+# 运行全套单元测试、无头仿真与端到端集成测试 (96 项测试 100% 通过)
 cargo test
 
 # 代码质量检查 (严格零 Warning)
@@ -204,7 +208,7 @@ cargo run -- --port 8081 --mcp-port 8082 -w --log-level debug
 | `--heartbeat-timeout-secs <sec>` | `heartbeat_timeout_secs` | `u64` | `30` | 活跃客户端心跳超时时间（单位：秒；超时后进入断线宽限期；默认 30 秒） |
 | `--snapshot-heartbeat-ms <ms>` | `snapshot_heartbeat_ms` | `u64` | `1000` | 快照保活心跳周期（毫秒；静止状态去重跳过，达到周期强制推流保活；设为 `0` 禁用去重） |
 | `-h, --help` | - | - | - | 打印命令行帮助信息与选项详情 |
-| `-V, --version` | - | - | - | 打印当前 TextCraft 版本号 (`3.0.0`) |
+| `-V, --version` | - | - | - | 打印当前 TextCraft 版本号 (`5.0.0`) |
 
 ---
 
@@ -216,7 +220,7 @@ cargo run -- --port 8081 --mcp-port 8082 -w --log-level debug
 页面加载后将自动通过 WebSocket 握手进入游戏。
 
 ### 4.0 多用户与管理员 URL 路由 (`#/username/token`)
-TextCraft 3.0 前端内置 `resolveClientIdentity()`，支持通过 URL 直接指定用户名与认证 Token，非常适合**单浏览器多标签页联机调试**或快速登录管理员：
+TextCraft 5.0 前端内置 `resolveClientIdentity()`，支持通过 URL 直接指定用户名与认证 Token，非常适合**单浏览器多标签页联机调试**或快速登录管理员：
 - **默认访问**：`http://127.0.0.1:8081` — 自动读取或生成 `localStorage` 中的持久化角色（`textcraft_user`）。
 - **指定普通玩家（推荐 Hash 路由）**：
   - `http://127.0.0.1:8081/#/alice` — 以用户名 `alice` 登录（无特权 Token，不覆盖 `localStorage`，可在不同标签页同时打开 `#/alice`、`#/bob` 互不串号，且在地址栏直接修改 Hash 会自动重连切换角色）。
@@ -229,6 +233,7 @@ TextCraft 3.0 前端内置 `resolveClientIdentity()`，支持通过 URL 直接�
 - 前端根据快照中的 `cols`（默认 80）与 `rows`（默认 24）动态计算最佳等宽字体尺寸：
   $$\text{fontSize} = \min\left(\frac{W_{\text{window}}}{\text{cols}} \times 1.6, \frac{H_{\text{window}}}{\text{rows}}\right)$$
 - 无论窗口大小或屏幕宽高比如何变动，字符视口均保持 Letterbox 居中铺满、永不换行撕裂。
+- **切后台智能保活与唤醒**：客户端监听 `visibilitychange` 与 `window.focus` 事件，当标签页重新激活时自动发送 Ping 探活并请求即时快照，彻底解决移动端/后台标签页被浏览器节流导致的幽灵掉线。
 
 ### 4.2 浮动 HUD 与操作按键
 - **键盘移动**：`W` / `A` / `S` / `D` 或方向键控制角色移动与探索。
@@ -249,8 +254,8 @@ Scheme 主脚本需实现以下标准生命周期函数：
 
 | 函数签名 | 触发时机 | 职责说明 |
 |---|---|---|
-| `(engine:target-fps)` | 每次时钟调度前 | 返回当前目标帧率（1 ~ 60），宿主据此动态调整睡眠节拍 |
-| `(engine:viewport-size pid)` | 视口渲染前 | 返回 `(list cols rows)`，动态定义该玩家当前屏幕行列大小 |
+| `(engine:target-fps)` | 每次时钟调度前 | 返回当前目标帧率（1 ~ 60），宿主据此动态调整睡眠节拍（缺省默认 60） |
+| `(engine:viewport-size pid)` | 视口渲染前 | 返回 `(list cols rows)`，动态定义该玩家当前屏幕行列大小（缺省默认 80×24） |
 | `(engine:hud-config)` | 握手与主题同步 | 返回 HUD 主题配置（如 `"theme": "cyberpunk"`） |
 | `(engine:on-init)` | 引擎启动时 | 初始化 `*world-state*` 地图分块、实体与初始数据 |
 | `(engine:on-player-join pid token)` | 玩家建立连接 | 解析 `username:token`，清理同身份旧连接，恢复存档或创建角色并置 `"online" #t` |
@@ -267,14 +272,15 @@ Scheme 主脚本需实现以下标准生命周期函数：
 
 ### 宿主注入函数 (Host Functions)
 
-Rust 宿主向 Scheme 运行环境注册了系统级日志、随机数与广播原语，并在 v4.0 中全面注入了 Flecs ECS 与 Roguelike 数学密集算子：
-- 通用基础：`(engine:send-message pid channel text)`、`(engine:broadcast channel text)`、`(engine:log text)`、`(engine:random-int min max)`
+Rust 宿主向 Scheme 运行环境注册了系统级日志、随机数与广播原语，并在 v5.0 中全面注入了 Flecs ECS、Roguelike 数学密集算子与专用 MCP 黑板存储：
+- 通用基础：`(engine:send-message pid channel text)`、`(engine:broadcast channel text)`、`(engine:log text)`、`(engine:random-int min max)`、`(engine:strip-ansi text)`
 - ECS 状态管理：`(ecs:spawn)`、`(ecs:despawn id)`、`(ecs:set-pos id x y layer)`、`(ecs:get-pos id)`、`(ecs:set-glyph id ch fg bg solid opaque)`、`(ecs:set id key val)`、`(ecs:get id key)`、`(ecs:relate id rel target)`、`(ecs:query query-str)` 等
 - 通用数学算子：`(ecs:fov origin-x origin-y radius)`、`(ecs:find-path start-x start-y goal-x goal-y)`、`(ecs:dijkstra-map goals)`、`(ecs:noise-2d x y scale)`、`(ecs:generate-cave w h iterations fill-prob)`
+- 仿真与黑板：`(engine:mcp-store-get key [ns])`、`(engine:mcp-store-set key val [ns])`、`(engine:mcp-store-keys [ns])`、`(engine:mcp-store-delete key [ns])`、`(engine:seed-prng seed)`
 
 > [!TIP]
 > **完整 Rust-Scheme FFI 与开发指南**：
-> 有关 4.0 详细的原语参数签名、类型映射、DSL 宏、Qud 涌现机制与 MCP 在线调试实战，请参阅专门文档：[**《Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南》 (`docs/develop/scheme_developer_guide.md`)**](docs/develop/scheme_developer_guide.md)。
+> 有关 5.0 详细的原语参数签名、类型映射、DSL 宏、Qud 涌现机制与 MCP 在线调试实战，请参阅专门文档：[**《Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南》 (`docs/develop/scheme_developer_guide.md`)**](docs/develop/scheme_developer_guide.md)。
 
 ---
 
@@ -288,14 +294,21 @@ GitHub Actions CI 流水线为 Linux、macOS 与 Windows 构建开箱即用的�
 解压后包内目录结构如下：
 ```text
 textcraft/
-  ├── server (.exe)                  # 单二进制独立运行程序
+  ├── server (.exe)                  # 单二进制独立运行程序 (内置 Web 终端与 MCP 服务端)
   ├── scripts/                       # Scheme 核心引擎脚本
-  │   ├── prelude.scm
-  │   └── main.scm
-  ├── docs/                          # 开发者文档
+  │   ├── prelude.scm                # 基础宏与 MCP 注册表
+  │   ├── anatomy.scm                # 解剖学多肢体系统
+  │   ├── chemistry.scm              # 液体与热力学系统
+  │   ├── mutation.scm               # 变异能力系统
+  │   ├── worldgen.scm               # 程序化世界生成
+  │   └── main.scm                   # 游戏主入口与交互管道
+  ├── docs/                          # 开发者完整文档
   │   └── develop/
+  │       ├── scheme_developer_guide.md
   │       ├── agent_developer_guide.md
-  │       └── mcp_developer_guide.md
+  │       ├── mcp_developer_guide.md
+  │       ├── steel_scheme_reference.md
+  │       └── steel_scheme_best_practices.md
   └── README.md                      # 使用说明
 ```
 
@@ -303,4 +316,4 @@ textcraft/
 ```bash
 ./server
 ```
-即可在浏览器中开启 TextCraft 3.0 的冒险世界！
+即可在浏览器中开启 TextCraft 5.0 的冒险世界！

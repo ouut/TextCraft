@@ -1,5 +1,15 @@
 # TextCraft 3.0 混合架构与纯 Scheme 游戏引擎规范 (Specification 3.0)
 
+> [!NOTE]
+> **历史基线规范文档归档**：
+> 本文档记录 TextCraft 3.0 混合 UI 架构的历史技术规范。
+> 最新 TextCraft 5.0 架构（Flecs ECS 权威状态底座、原生 sub-5μs 光栅化、Roguelike 算子库与 Agent 自动驾驶引擎），请参阅：
+> - 核心架构与使用指南：[**《README.md》**](../../README.md)
+> - 版本演进日志：[**《版本演进与架构变更日志》**](changelog.md)
+> - 双引擎演进路线图：[**《v4.0/5.0 架构与路线图》**](v4.0_architecture_and_roadmap.md)
+> - Scheme FFI 开发指南：[**《Scheme 开发者指南》**](../develop/scheme_developer_guide.md)
+> - MCP AI 协同指南：[**《MCP 开发者与 AI 协同指南》**](../develop/mcp_developer_guide.md)
+
 > **核心哲学**：  
 > **1. 游戏语义完全归属 Scheme，Rust 零硬编码结构体（Zero Rust Game Structs）**。  
 > **2. 混合 UI 表现层（Hybrid UI）：死守 `<pre>` 极速字符流 + 现代 HTML/CSS 浮动 HUD**。  

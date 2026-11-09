@@ -1,11 +1,11 @@
-# TextCraft: 游戏与前端 HUD 开发者综合指南 (Agent Developer Guide)
+# TextCraft 5.0: 游戏与前端 HUD 开发者综合指南 (Agent Developer Guide)
 
 > [!IMPORTANT]
 > **致阅读本指南的开发者与智能体（Agent）**：
-> TextCraft 4.0 采用 **“Flecs ECS 权威底座 + 原生 ANSI 光栅化 + 密集数学算子 (Rust) + 纯 Scheme 动态业务逻辑 (Steel) + 极简 Web 终端底座 + 单进程 MCP AI 管道”** 架构：
-> - **4.0 核心逻辑与 FFI 接口开发**：关于 Flecs ECS 原语、数学密集算子（FOV/A*/Dijkstra/噪声/洞窟）、解剖学肢体、化学液体池、变异系统与生命周期钩子，请**直接参阅专门文档**：[**《Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南》 (`scheme_developer_guide.md`)**](scheme_developer_guide.md)；
+> TextCraft 5.0 采用 **“Flecs ECS 权威底座 + 原生 ANSI 光栅化 + 密集数学算子 (Rust) + 纯 Scheme 动态业务逻辑 (Steel) + Agent 自动驾驶与无头推演 + 极简 Web 终端底座 + 单进程 MCP AI 管道”** 架构：
+> - **5.0 核心逻辑与 FFI 接口开发**：关于 Flecs ECS 原语、数学密集算子（FOV/A*/Dijkstra/噪声/洞窟）、解剖学肢体、化学液体池、变异系统与生命周期钩子，请**直接参阅专门文档**：[**《Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南》 (`scheme_developer_guide.md`)**](scheme_developer_guide.md)；
 > - **定制前端 HUD 界面与交互**：只需在 `web/index.html` 中调用全局桥接对象 `window.TextCraft`，自由编写原生 HTML/CSS/JS，通过纯 JSON 字典与 Scheme 通信（详见本指南第三部分）；
-> - **使用 MCP 工具与 AI 实时协同开发**：通过 `--mcp-port 8082` 开启 HTTP JSON-RPC 2.0 MCP 接口，并使用 `ecs_inspect`、`ecs_query` 与 `ecs_modify` 实时透视实体，详见 [**《MCP 开发者与 AI 协同开发指南》 (`mcp_developer_guide.md`)**](mcp_developer_guide.md)；
+> - **使用 MCP 工具与 AI 实时协同开发**：通过 `--mcp-port 8082` 开启 HTTP JSON-RPC 2.0 MCP 接口，使用 `ecs_inspect`、`ecs_query`、`ecs_modify` 实时透视实体，或调用 `sim_step`、`state_diff`、`assert_state` 与 `mcp_storage_*` 驱动智能体自闭环推演，详见 [**《MCP 开发者与 AI 协同开发指南》 (`mcp_developer_guide.md`)**](mcp_developer_guide.md)；
 > - **查询 Steel 内置函数与标准库**：TextCraft 使用嵌入式 Steel Scheme 0.8.3 引擎，支持数百个原生数学、字符串、列表、哈希表、集合、文件与网络操作，详见 [**《Steel Scheme 0.8.3 内置标准库与核心函数参考手册》 (`steel_scheme_reference.md`)**](steel_scheme_reference.md)；
 > - **心法跃迁与编码实践**：想要消除括号心智负担、写出高内聚数据流代码，请参阅 [**《Steel Scheme 代码开发最佳实践：从入门到“快到起飞”》 (`steel_scheme_best_practices.md`)**](steel_scheme_best_practices.md)。
 
@@ -19,40 +19,49 @@ flowchart TD
         Screen["<pre id='screen'><br>24-bit ANSI 极速字符流 (自适应字号居中)"]
         SDK["window.TextCraft 桥接 SDK<br>onHud / onEvent / sendAction / sendCmd / sendKey"]
         CustomHUD["自定义 HTML/CSS HUD<br>(状态栏 / 背包 / 对话弹窗 / 日志)"]
+        Wakeup["visibilitychange 自动唤醒 Ping"]
     end
 
-    subgraph Host["Rust 宿主容器 (纯管道，零游戏结构体)"]
-        Gateway["Axum HTTP + WebSocket 全双工网关<br>(Ping/Pong 保活 + 60s 断线重连宽限期)"]
+    subgraph Host["Rust 宿主与权威底座 (High-Performance Host)"]
+        Gateway["Axum HTTP + WebSocket 全双工网关<br>(--web-dir 资产优先 / 30s 心跳容限 / 60s 宽限期)"]
         Loop["自适应主循环 tick(dt)<br>(1~60 FPS 动态变频 + 脏版本短路去重)"]
-        VM["Steel Scheme VM 沙箱与看门狗保护"]
+        Flecs["Flecs ECS 权威底座<br>(GridPos, VisualGlyph, DynamicProps, Pairs)"]
+        Spatial["SpatialGrid (FxHashMap 空间哈希)"]
+        Rasterizer["ViewportRasterizer (4.53 μs ANSI 光栅化)"]
+        Blackboard["McpStorage (智能体隔离记忆黑板)"]
+        VirtualClock["无头虚拟推演时钟 (simulate_steps)"]
+        MCP["MCP JSON-RPC 2.0 服务端 (:8082)"]
     end
 
     subgraph Scheme["Scheme 游戏核心 (scripts/)"]
-        Prelude["prelude.scm<br>16x16 分块存储 / ANSI RLE 光栅化 / 玩家存档"]
-        Main["main.scm<br>世界生成 / 碰撞战斗 / 怪物 AI / 生命周期钩子"]
-        State[("*world-state*<br>纯数据全局状态树 (零闭包)")]
+        Prelude["prelude.scm (宏生态 / ECS DSL / MCP 注册表)"]
+        Anatomy["anatomy.scm (肢体树 / 装备 / 暴击断肢)"]
+        Chemistry["chemistry.scm (液体池 / 热力学 / 酸蚀相变)"]
+        Mutation["mutation.scm (变异 / 技能冷却 / 属性修正)"]
+        WorldGen["worldgen.scm (洞窟 / 盐沼 / 生态种群)"]
+        Main["main.scm (回合主循环 / 协议响应 / 钩子)"]
+        State[("*world-state*<br>纯数据动态状态树")]
     end
 
-    CustomHUD -->|调用| SDK
-    SDK -->|C2S: UIAction / Key / Mouse / Cmd| Gateway --> Loop --> VM
-    VM -->|触发钩子| Main
-    Main <--> State
-    Main --> Prelude
-    Prelude & Main -->|S2C: Snapshot { cols, rows, screen, hud } + Event| Gateway
-    Gateway --> Screen & SDK
-    SDK -->|分发数据| CustomHUD
+    CustomHUD & Wakeup -->|调用| SDK
+    SDK -->|C2S: UIAction / Key / Mouse / Cmd| Gateway --> Loop
+    Loop --> Flecs & Spatial & Rasterizer
+    Loop --> Scheme
+    Rasterizer --> Screen
+    Scheme -->|S2C: Snapshot { cols, rows, hud }| Gateway --> SDK --> CustomHUD
+    MCP <--> Blackboard & VirtualClock & Flecs
 ```
 
 ### 四大核心开发准则
 
-1. **纯数据世界状态（Pure Data Only）**：
-   全局世界状态保存在 `*world-state*` 哈希表中。其中所有数据必须为**可 JSON 序列化的纯数据**（哈希表、列表、整数、浮点数、字符串、布尔值）。**严禁在 `*world-state*` 中存储 Lambda 闭包或函数引用**，以保障热重载状态恢复与磁盘存档 100% 成功。
-2. **脏版本标记（Dirty Version Tracking）**：
-   引擎内置 `*visual-version*` 计数器。任何修改地图瓦片、玩家属性或双宽模式的操作都会调用 `(bump-visual-version!)`。当版本未变且未到心跳周期时，Rust 宿主会**直接跳过 `render-snapshot` 光栅化**（静止帧开销 `< 0.05ms`）。如果你直接通过 `set!` 修改了影响画面的自定义全局状态，请务必调用 `(bump-visual-version!)`。
-3. **分层瓦片与 ANSI RLE 光栅化**：
-   世界分为 4 个渲染图层：`terrain`（底层地形）、`surface`（地表物品/设施）、`actor`（生物/NPC/其他玩家）、`overlay`（顶层特效）。`render-viewport-ansi` 会自动合并同行连续相同颜色的 ANSI 转义码（RLE 压缩），大幅降低网络带宽与 DOM 解析开销。
-4. **前后端纯数据契约（Pure JSON HUD Contract）**：
-   Scheme 在 `(engine:render-snapshot pid)` 中返回的 `"hud"` 字典会被原样序列化为 JSON 推给前端 `TextCraft.onHud(hud)`；前端通过 `TextCraft.sendAction(action, payload)` 发送的交互会被路由至 Scheme 的 `(engine:on-ui-action pid action-map)`。
+1. **Flecs 权威物理底座 vs 动态玩法规则（Authoritative ECS vs Dynamic Rules）**：
+   实体的空间坐标（`GridPos`）、外观图元（`VisualGlyph`）、层级结构（`PartOf`）、装备挂载（`EquippedOn`）与会话绑定（`PlayerSession`）常驻 Flecs ECS 权威内存，由 Rust 维护极速空间哈希与原生光栅化；游戏剧本、任务状态与 HUD 则保存在 Scheme 纯数据字典中。
+2. **脏版本标记与微秒级短路（Dirty Version Tracking）**：
+   引擎内置 `*visual-version*` 计数器与玩家专属脏标记。任何移动、变异、状态变迁或通过 `(ecs:set-pos ...)` 变更图元的操作都会自动标记脏状态。在静止帧或未达到保活周期时，宿主直接跳过全量快照推流，单帧开销 `< 0.05ms`。
+3. **四图层与原生 ANSI RLE 光栅化（Sub-5μs Rasterizer）**：
+   世界分为 4 个物理图层：`0: LAYER-TERRAIN`、`1: LAYER-SURFACE`、`2: LAYER-ACTOR`、`3: LAYER-OVERLAY`。Rust 底层 `ViewportRasterizer` 状态机直接在 4.53 μs 内完成多层重叠覆盖与 ANSI 行颜色状态合并压缩，网络带宽减少 95%。
+4. **前后端纯数据契约与 Agent 自动推演（Pure JSON HUD & MCP Self-Driving）**：
+   Scheme 在 `(engine:render-snapshot pid)` 中返回的 `"hud"` 字典被序列化为 JSON 推给前端；前端通过 `TextCraft.sendAction` 触发 Scheme 响应。AI Agent 则可通过 MCP 无头推演接口 (`sim_step`, `state_diff`, `assert_state`) 在虚拟时钟下自动验证数千步游戏逻辑。
 
 ---
 

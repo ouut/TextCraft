@@ -82,8 +82,8 @@ impl<TInput, TCmd, TSnapshot: Clone, TEvent> ServerHandleExt<TSnapshot, TEvent>
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "textcraft-server",
-    version = "3.0.0",
-    about = "TextCraft 3.0 Adaptive Clock Server Gateway"
+    version = "5.0.0",
+    about = "TextCraft 5.0 Adaptive Clock Server Gateway"
 )]
 pub struct ServerArgs {
     /// Host / IP address to bind to
@@ -1485,7 +1485,7 @@ impl TextCraftServer {
                     },
                     "serverInfo": {
                         "name": "textcraft-mcp",
-                        "version": "3.1.0"
+                        "version": "5.0.0"
                     }
                 }
             }),

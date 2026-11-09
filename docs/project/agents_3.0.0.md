@@ -1,5 +1,14 @@
 # TextCraft 3.0 多 Agent 协同推倒重构路线图 (Agents Consensus 3.0)
 
+> [!NOTE]
+> **历史基线协作规范归档**：
+> 本文档记录 TextCraft 3.0 时期多 Agent 协同重构的历史任务编排。
+> 最新 TextCraft 5.0 架构与多 Agent 协同工作流，请参阅：
+> - 核心架构与使用指南：[**《README.md》**](../../README.md)
+> - 版本演进日志：[**《版本演进与架构变更日志》**](changelog.md)
+> - 双引擎演进路线图：[**《v4.0/5.0 架构与路线图》**](v4.0_architecture_and_roadmap.md)
+> - MCP AI 协同指南：[**《MCP 开发者与 AI 协同指南》**](../develop/mcp_developer_guide.md)
+
 本文档制定了全面推倒重来、彻底剥离 Rust 游戏结构体、构建 **Hybrid UI（`<pre>` 字符流 + HTML 浮动 HUD）**，并支持 **Scheme 动态视口、自定义 HUD 主题与动态 FPS 变频控制** 的工作流与 Agent 任务编排。
 
 ---

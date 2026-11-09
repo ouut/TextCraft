@@ -1,8 +1,8 @@
-# TextCraft 4.0: Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南
+# TextCraft 5.0: Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南
 
 > [!IMPORTANT]
 > **致阅读本指南的 AI Agent 与开发者**：
-> TextCraft 4.0 采用了 **“Flecs ECS 权威状态底座 (Rust) + 通用密集数学算子 (Rust) + ANSI 零拷贝光栅化 (Rust) + 动态涌现规则与玩法系统 (Steel Scheme)”** 的双引擎架构。
+> TextCraft 5.0 采用了 **“Flecs ECS 权威状态底座 (Rust) + 通用密集数学算子 (Rust) + ANSI 零拷贝光栅化 (Rust) + Agent 自动驾驶记忆黑板 (Rust) + 动态涌现规则与玩法系统 (Steel Scheme)”** 的双引擎架构。
 > 本文档专门面向编写 Scheme 脚本（`scripts/*.scm`）的 AI 智能体与游戏逻辑开发者，详尽拆解 Rust 宿主与 Scheme 虚拟机之间的**双向通信契约、所有 FFI 原语、DSL 宏封装、数据类型映射、生命周期钩子、Qud 涌现设计模式与 MCP 调试实践**。
 
 ---
@@ -337,7 +337,33 @@ TextCraft 4.0 充分利用了 Flecs 原生的 Entity-Entity 关系对功能（`R
 | `(engine:broadcast channel text)` | 向全服在线客户端广播一条文本消息 |
 | `(engine:log text)` | 输出一条结构化日志到服务端的 `tracing` 日志流 |
 | `(engine:random-int min max)` | 生成 `[min, max]` 闭区间内的高质量伪随机整数 |
+| `(engine:seed-prng seed)` | 设置确定性随机数发生器种子（整型数值），用于时空回溯与确定性推演 |
 | `(engine:strip-ansi text)` | 剔除字符串中的 ANSI 颜色转义码（保留纯文本网格用于 LLM 读取） |
+
+### 2.11 智能体专用记忆黑板原语 (`mcp-store`)
+
+为了支持 AI Agent 在多回合推演中维护记忆、计划和检查点，Rust 宿主注入了一套**完全不污染游戏物理状态和玩家存档**的专用键值存储黑板：
+
+```scheme
+;; 1. 底层宿主原语 (带可选命名空间参数，缺省默认命名空间为 "default")
+(engine:mcp-store-set key val [namespace])
+(engine:mcp-store-get key [namespace])
+(engine:mcp-store-keys [namespace])
+(engine:mcp-store-delete key [namespace])
+
+;; 2. prelude.scm 封装的高阶 API
+(mcp-store:set! "plan_step" 2 "agent_memory")
+(mcp-store:get "plan_step" "agent_memory" 0)    ;; => 2 (未找到返回默认值 0)
+(mcp-store:keys "agent_memory")                 ;; => ("plan_step")
+(mcp-store:delete! "plan_step" "agent_memory")
+```
+
+此外，`prelude.scm` 还提供了持续按键按压与长按时间统计原语（用于平台跳跃与连续移动）：
+```scheme
+(player:handle-key-action! pid key action)      ;; action 为 "down" 或 "up"
+(player:key-pressed? pid key)                  ;; 是否正在按住
+(player:key-hold-ticks pid key)                ;; 已持续按住的 tick 数
+```
 
 ---
 

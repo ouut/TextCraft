@@ -1,10 +1,12 @@
-# TextCraft 3.0: MCP (Model Context Protocol) 开发者与 AI 协同开发指南
+# TextCraft 5.0: MCP (Model Context Protocol) 开发者与 AI 协同开发指南
 
 > [!IMPORTANT]
-> **TextCraft MCP 核心设计哲学**：
-> TextCraft 采用 **「单进程 `--mcp-port` HTTP JSON-RPC 2.0 管道 + 复用现有游戏命令与输入系统 + Scheme 动态可扩展 MCP 工具注册表」** 架构。
+> **TextCraft 5.0 MCP 核心设计哲学**：
+> TextCraft 采用 **「单进程 `--mcp-port` HTTP JSON-RPC 2.0 管道 + Flecs ECS 权威底座透视 + Agent 自动驾驶与无头推演 + Scheme 动态可扩展 MCP 工具注册表」** 架构。
 > - **同进程实时同屏**：AI 客户端通过 HTTP 连接正在运行的游戏服务端，AI 的每一次指令、传送、刷怪或代码热改都会在人类玩家的浏览器视口与 HUD 日志中毫秒级同步展现！
-> - **零编译动态造工具**：AI 与开发者无需修改或重新编译任何 Rust 代码，只需在 `scripts/*.scm`（或在线 `!` REPL）中调用 `(mcp:def-tool ...)` 即可随时扩展全新的 MCP 工具！
+> - **权威 ECS 状态透视**：通过 `ecs_inspect`、`ecs_query` 与 `ecs_modify`，AI 可以亚微秒级穿透 C-Core 内存直接检索、内省和原子修改万级实体、解剖学肢体树与化学液体池！
+> - **无头虚拟推演与时空旅行**：支持以任意时间步长 `dt` 进行无头仿真推演 (`sim_step`)、确定性随机种子 (`seed`)、状态作用域差分 (`state_diff`)、批量断言测试 (`assert_state`) 与隔离的智能体黑板记忆 (`mcp_storage_*`)。
+> - **零编译动态造工具**：AI 与开发者无需修改或重新编译任何 Rust 代码，只需在 `scripts/*.scm`（或在线 `!` REPL）中调用 `(mcp:def-tool ...)` 并搭配 `(ecs:* ...)` 原语即可随时扩展全新的 ECS MCP 工具！
 
 ---
 
@@ -354,8 +356,70 @@ Rust 宿主层内置了 **3 个永不失效的核心桥接工具**（即使 `.sc
 }
 ```
 
-### 16. `ecs_inspect`, `ecs_query`, `ecs_modify` —— Flecs ECS 实体图谱在线透视与修改
-用于实时透视和修改底层 10,000+ 实体的空间位置、层级、关系对、动态属性与标签。详见 `tests/phase5_scale_benchmark.rs`。
+### 16. `ecs_inspect` —— Flecs ECS 单实体全图谱深度内省与原地打补丁
+用于根据实体数值 ID (`eid`) 深度读取实体在 Flecs C 内存中的所有组件、关系对与动态属性，并支持在内省时原地打补丁修改：
+```json
+{
+  "name": "ecs_inspect",
+  "arguments": {
+    "eid": 1024,
+    "modify": {
+      "set_props": { "hp": 150, "state": "enraged" },
+      "add_tags": ["Elite", "Burning"]
+    }
+  }
+}
+```
+返回实体完整结构化 JSON：
+- `id` / `name`：实体数值 ID 与名称字符串；
+- `pos`：坐标 `{ "x": 12, "y": -4, "layer": 2 }`；
+- `glyph`：图元与穿透 `{ "ch": "M", "fg": [255, 60, 60], "bg": [0, 0, 0], "solid": true, "opaque": false }`；
+- `tags`：所附带的标签数组，如 `["Monster", "Hostile", "Elite"]`；
+- `dynamic_props`：动态属性字典，如 `{ "hp": 150, "max_hp": 200, "attack": 18 }`；
+- `relationships`：实体关系对，如 `[ { "relation": "PartOf", "target": 100 } ]`；
+- `player_session`：若绑定了玩家会话，返回关联的网络 `player_id`。
+
+### 17. `ecs_query` —— Flecs C 原生查询 DSL 极速空间检索
+直接暴露 Flecs 官方 C 查询引擎 DSL，微秒级在十万级实体中筛选匹配的实体，并返回匹配实体的内省详情列表：
+```json
+{
+  "name": "ecs_query",
+  "arguments": {
+    "query": "GridPos, Monster, !Dead",
+    "limit": 20
+  }
+}
+```
+- `query`：Flecs 查询表达式，例如：
+  - `"GridPos, Monster"`：拥有位置且标记为怪物的活跃实体；
+  - `"Liquid, (CoveredWith, $target)"`：液体与沾染关系查询；
+  - `"Item, !Equipped"`：未被装备的地表物品；
+- `limit`：返回实体数量上限（默认 50，防止超大列表撑爆模型上下文）。
+
+### 18. `ecs_modify` —— 细粒度原子修改 ECS 实体
+对指定实体执行精细的物理、组件与关系增删改，亚微秒级生效且不产生垃圾回收负担：
+```json
+{
+  "name": "ecs_modify",
+  "arguments": {
+    "eid": 1024,
+    "set_pos": { "x": 15, "y": 8, "layer": 2 },
+    "set_glyph": { "ch": "E", "fg": [255, 200, 50], "solid": true },
+    "set_props": { "hp": 80 },
+    "delete_props": ["poison_timer"],
+    "add_tags": ["Frozen"],
+    "remove_tags": ["Burning"],
+    "relate": { "relation": "PartOf", "target": 500 },
+    "despawn": false
+  }
+}
+```
+- `set_pos`：更新空间网格坐标与渲染图层（同时自动刷新 `SpatialGrid` 空间哈希）；
+- `set_glyph`：更新字符显示、前景色/背景色及阻挡/遮光属性；
+- `set_props` / `delete_props`：原子更新或删除动态属性键值对；
+- `add_tags` / `remove_tags`：添加或剥离标签；
+- `relate` / `unrelate`：建立或解除关系对（如 `EquippedOn`、`PartOf`）；
+- `despawn: true`：物理销毁实体及其关联的子级关系树。
 
 ---
 
