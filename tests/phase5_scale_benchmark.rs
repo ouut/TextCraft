@@ -525,6 +525,7 @@ async fn test_multiplayer_gateway_and_chemistry_emergence_tick() {
             shift: false,
             ctrl: false,
             alt: false,
+            action: Default::default(),
         });
     let text = DualCodec::encode_text(&move_cmd).unwrap();
     ws_stream.send(Message::Text(text)).await.unwrap();

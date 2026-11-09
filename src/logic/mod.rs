@@ -1,8 +1,8 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use parking_lot::Mutex;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use serde_json::Value;
 use steel::rvals::SteelVal;
 use steel::steel_vm::register_fn::RegisterFn;
@@ -11,7 +11,7 @@ use game_script::{json_to_steel_val, steel_val_to_json, ScriptApp, ScriptWatcher
 use crate::ecs::components::{GridPos, PlayerSession};
 use crate::ecs::rasterizer::ViewportRasterizer;
 use crate::ecs::world::EcsWorld;
-use crate::types::{PlayerInput, PlayerSnapshot};
+use crate::types::{resolve_namespace_and_key, McpStorage, PlayerInput, PlayerSnapshot};
 use flecs_ecs::prelude::*;
 
 pub mod ecs_ffi;
@@ -73,6 +73,248 @@ fn steel_to_string(v: &SteelVal) -> String {
     }
 }
 
+/// Projects a JSON root value by extracting specific dot-separated paths (e.g. "players.1.x", "players.1.gold")
+/// and assembling them into a compact partial JSON tree.
+pub fn project_json_value(root: &serde_json::Value, paths: &[String]) -> serde_json::Value {
+    let mut projected = serde_json::Map::new();
+
+    for path in paths {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let segments: Vec<&str> = trimmed.split('.').collect();
+        let mut curr = root;
+        let mut found = true;
+        for &seg in &segments {
+            match curr {
+                Value::Object(map) => {
+                    if let Some(next) = map.get(seg) {
+                        curr = next;
+                    } else {
+                        found = false;
+                        break;
+                    }
+                }
+                Value::Array(arr) => {
+                    if let Ok(idx) = seg.parse::<usize>() {
+                        if let Some(next) = arr.get(idx) {
+                            curr = next;
+                        } else {
+                            found = false;
+                            break;
+                        }
+                    } else {
+                        found = false;
+                        break;
+                    }
+                }
+                _ => {
+                    found = false;
+                    break;
+                }
+            }
+        }
+
+        if !found {
+            continue;
+        }
+
+        let val_to_insert = curr.clone();
+        insert_projected_path(&mut projected, &segments, val_to_insert);
+    }
+
+    Value::Object(projected)
+}
+
+fn insert_projected_path(
+    current_map: &mut serde_json::Map<String, Value>,
+    segments: &[&str],
+    val: Value,
+) {
+    if segments.is_empty() {
+        return;
+    }
+    if segments.len() == 1 {
+        current_map.insert(segments[0].to_string(), val);
+        return;
+    }
+
+    let head = segments[0];
+    let tail = &segments[1..];
+
+    let entry = current_map
+        .entry(head.to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+
+    if let Value::Object(sub_map) = entry {
+        insert_projected_path(sub_map, tail, val);
+    } else {
+        let mut sub_map = serde_json::Map::new();
+        insert_projected_path(&mut sub_map, tail, val);
+        *entry = Value::Object(sub_map);
+    }
+}
+
+pub fn compute_json_diff(old_val: &Value, new_val: &Value) -> Value {
+    compute_json_diff_scoped(old_val, new_val, None, None)
+}
+
+pub fn compute_json_diff_scoped(
+    old_val: &Value,
+    new_val: &Value,
+    path_prefix: Option<&str>,
+    exclude_keys: Option<&[&str]>,
+) -> Value {
+    let mut added = serde_json::Map::new();
+    let mut removed = serde_json::Map::new();
+    let mut changed = serde_json::Map::new();
+
+    fn navigate<'a>(mut val: &'a Value, path: &str) -> Option<&'a Value> {
+        if path.is_empty() {
+            return Some(val);
+        }
+        for seg in path.split('.') {
+            if seg.is_empty() {
+                continue;
+            }
+            match val {
+                Value::Object(map) => {
+                    val = map.get(seg)?;
+                }
+                Value::Array(arr) => {
+                    let idx = seg.parse::<usize>().ok()?;
+                    val = arr.get(idx)?;
+                }
+                _ => return None,
+            }
+        }
+        Some(val)
+    }
+
+    fn diff_recursive(
+        prefix: &str,
+        old: &Value,
+        new: &Value,
+        exclude: Option<&[&str]>,
+        added: &mut serde_json::Map<String, Value>,
+        removed: &mut serde_json::Map<String, Value>,
+        changed: &mut serde_json::Map<String, Value>,
+    ) {
+        if old == new {
+            return;
+        }
+
+        let is_excluded = |k: &str, full_path: &str| -> bool {
+            if let Some(keys) = exclude {
+                keys.iter().any(|&ex| ex == k || ex == full_path)
+            } else {
+                false
+            }
+        };
+
+        match (old, new) {
+            (Value::Object(old_map), Value::Object(new_map)) => {
+                for (k, v_old) in old_map {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{}.{}", prefix, k)
+                    };
+                    if is_excluded(k, &path) {
+                        continue;
+                    }
+                    if let Some(v_new) = new_map.get(k) {
+                        diff_recursive(&path, v_old, v_new, exclude, added, removed, changed);
+                    } else {
+                        removed.insert(path, v_old.clone());
+                    }
+                }
+                for (k, v_new) in new_map {
+                    let path = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{}.{}", prefix, k)
+                    };
+                    if is_excluded(k, &path) {
+                        continue;
+                    }
+                    if !old_map.contains_key(k) {
+                        added.insert(path, v_new.clone());
+                    }
+                }
+            }
+            (Value::Array(old_arr), Value::Array(new_arr)) => {
+                let max_len = old_arr.len().max(new_arr.len());
+                for idx in 0..max_len {
+                    let path = if prefix.is_empty() {
+                        idx.to_string()
+                    } else {
+                        format!("{}.{}", prefix, idx)
+                    };
+                    let idx_str = idx.to_string();
+                    if is_excluded(&idx_str, &path) {
+                        continue;
+                    }
+                    match (old_arr.get(idx), new_arr.get(idx)) {
+                        (Some(o), Some(n)) => {
+                            diff_recursive(&path, o, n, exclude, added, removed, changed);
+                        }
+                        (Some(o), None) => {
+                            removed.insert(path, o.clone());
+                        }
+                        (None, Some(n)) => {
+                            added.insert(path, n.clone());
+                        }
+                        (None, None) => {}
+                    }
+                }
+            }
+            _ => {
+                let key = if prefix.is_empty() {
+                    "root".to_string()
+                } else {
+                    prefix.to_string()
+                };
+                changed.insert(
+                    key,
+                    serde_json::json!({
+                        "old": old,
+                        "new": new
+                    }),
+                );
+            }
+        }
+    }
+
+    let clean_prefix = path_prefix.map(|s| s.trim()).filter(|s| !s.is_empty());
+    if let Some(p) = clean_prefix {
+        let sub_old = navigate(old_val, p);
+        let sub_new = navigate(new_val, p);
+        match (sub_old, sub_new) {
+            (Some(o), Some(n)) => {
+                diff_recursive(p, o, n, exclude_keys, &mut added, &mut removed, &mut changed);
+            }
+            (Some(o), None) => {
+                removed.insert(p.to_string(), o.clone());
+            }
+            (None, Some(n)) => {
+                added.insert(p.to_string(), n.clone());
+            }
+            (None, None) => {}
+        }
+    } else {
+        diff_recursive("", old_val, new_val, exclude_keys, &mut added, &mut removed, &mut changed);
+    }
+
+    serde_json::json!({
+        "added": added,
+        "removed": removed,
+        "changed": changed
+    })
+}
+
 fn sort_script_files(files: &mut [PathBuf]) {
     files.sort_by(|a, b| {
         let is_prelude_a = a.file_name().is_some_and(|f| f == "prelude.scm");
@@ -109,6 +351,8 @@ pub struct SchemeLogic {
     registered_hooks: HashSet<String>,
     ecs_world: Arc<Mutex<EcsWorld>>,
     rasterizer: Arc<Mutex<ViewportRasterizer>>,
+    pub mcp_storage: McpStorage,
+    rng: Arc<parking_lot::Mutex<Option<rand::rngs::StdRng>>>,
 }
 
 impl SchemeLogic {
@@ -151,6 +395,8 @@ impl SchemeLogic {
         let outbound_queue = Arc::new(Mutex::new(Vec::new()));
         let ecs_world = Arc::new(Mutex::new(EcsWorld::new()));
         let rasterizer = Arc::new(Mutex::new(ViewportRasterizer::new()));
+        let mcp_storage: McpStorage = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+        let rng = Arc::new(parking_lot::Mutex::new(None::<rand::rngs::StdRng>));
 
         // Register ECS primitives
         ecs_ffi::register_ecs_primitives(
@@ -190,11 +436,51 @@ impl SchemeLogic {
             },
         );
 
+        let rng_for_raw = Arc::clone(&rng);
+        app.engine.register_fn(
+            "engine:raw-random-int",
+            move |lo: isize, hi: isize, seed_val: SteelVal| -> isize {
+                let (min, max) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+                let mut guard = rng_for_raw.lock();
+                match seed_val {
+                    SteelVal::IntV(s) => {
+                        let mut r = rand::rngs::StdRng::seed_from_u64(s as u64);
+                        let val = if min == max { min } else { r.gen_range(min..=max) };
+                        *guard = Some(r);
+                        val
+                    }
+                    SteelVal::NumV(n) => {
+                        let mut r = rand::rngs::StdRng::seed_from_u64(n as u64);
+                        let val = if min == max { min } else { r.gen_range(min..=max) };
+                        *guard = Some(r);
+                        val
+                    }
+                    SteelVal::BoolV(false) if lo == 0 && hi == 0 => {
+                        *guard = None;
+                        0
+                    }
+                    _ => {
+                        if let Some(ref mut r) = *guard {
+                            if min == max { min } else { r.gen_range(min..=max) }
+                        } else {
+                            if min == max { min } else { rand::thread_rng().gen_range(min..=max) }
+                        }
+                    }
+                }
+            },
+        );
+
+        let rng_for_rand = Arc::clone(&rng);
         app.engine.register_fn(
             "engine:random-int",
             move |lo: isize, hi: isize| -> isize {
                 let (min, max) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-                rand::thread_rng().gen_range(min..=max)
+                let mut guard = rng_for_rand.lock();
+                if let Some(ref mut r) = *guard {
+                    if min == max { min } else { r.gen_range(min..=max) }
+                } else {
+                    if min == max { min } else { rand::thread_rng().gen_range(min..=max) }
+                }
             },
         );
 
@@ -205,9 +491,86 @@ impl SchemeLogic {
             },
         );
 
+        // Dedicated MCP Storage Generic Host Functions
+        let store_set = Arc::clone(&mcp_storage);
+        app.engine.register_fn(
+            "engine:raw-mcp-store-set!",
+            move |key: SteelVal, val: SteelVal, ns: SteelVal| -> bool {
+                let k_str = steel_to_string(&key);
+                let ns_str = steel_to_string(&ns);
+                let ns_opt = if ns_str.is_empty() { None } else { Some(ns_str.as_str()) };
+                let (resolved_ns, resolved_key) = resolve_namespace_and_key(ns_opt, &k_str);
+                let composite = format!("{}:{}", resolved_ns, resolved_key);
+                if let Ok(json_val) = steel_val_to_json(&val) {
+                    store_set.write().insert(composite, json_val);
+                    true
+                } else {
+                    false
+                }
+            },
+        );
+
+        let store_get = Arc::clone(&mcp_storage);
+        app.engine.register_fn(
+            "engine:raw-mcp-store-get",
+            move |key: SteelVal, ns: SteelVal| -> SteelVal {
+                let k_str = steel_to_string(&key);
+                let ns_str = steel_to_string(&ns);
+                let ns_opt = if ns_str.is_empty() { None } else { Some(ns_str.as_str()) };
+                let (resolved_ns, resolved_key) = resolve_namespace_and_key(ns_opt, &k_str);
+                let composite = format!("{}:{}", resolved_ns, resolved_key);
+                let guard = store_get.read();
+                if let Some(json_val) = guard.get(&composite).or_else(|| guard.get(&k_str)) {
+                    json_to_steel_val(json_val)
+                } else {
+                    SteelVal::BoolV(false)
+                }
+            },
+        );
+
+        let store_list = Arc::clone(&mcp_storage);
+        app.engine.register_fn(
+            "engine:raw-mcp-store-list",
+            move |ns: SteelVal| -> SteelVal {
+                let ns_str = steel_to_string(&ns);
+                let clean_ns = ns_str.trim();
+                let guard = store_list.read();
+                let keys: Vec<serde_json::Value> = if clean_ns.is_empty() {
+                    guard.keys().map(|k| serde_json::Value::String(k.clone())).collect()
+                } else {
+                    let ns_prefix = format!("{}:", clean_ns);
+                    guard
+                        .keys()
+                        .filter_map(|k| {
+                            k.strip_prefix(&ns_prefix)
+                                .map(|sub| serde_json::Value::String(sub.to_string()))
+                        })
+                        .collect()
+                };
+                json_to_steel_val(&serde_json::Value::Array(keys))
+            },
+        );
+
+        let store_del = Arc::clone(&mcp_storage);
+        app.engine.register_fn(
+            "engine:raw-mcp-store-delete!",
+            move |key: SteelVal, ns: SteelVal| -> bool {
+                let k_str = steel_to_string(&key);
+                let ns_str = steel_to_string(&ns);
+                let ns_opt = if ns_str.is_empty() { None } else { Some(ns_str.as_str()) };
+                let (resolved_ns, resolved_key) = resolve_namespace_and_key(ns_opt, &k_str);
+                let composite = format!("{}:{}", resolved_ns, resolved_key);
+                let mut guard = store_del.write();
+                let r1 = guard.remove(&composite).is_some();
+                let r2 = guard.remove(&k_str).is_some();
+                r1 || r2
+            },
+        );
+
         // Register safe datum parser helper (uses Scheme Reader only, never evals)
         let _ = app.engine.run(
             r#"
+            (define *__last_assertion_result* #f)
             (define (__engine:parse-datum s)
               (with-handler
                 (lambda (err) s)
@@ -235,7 +598,25 @@ impl SchemeLogic {
             registered_hooks: HashSet::new(),
             ecs_world,
             rasterizer,
+            mcp_storage,
+            rng,
         })
+    }
+
+    /// Sets or resets deterministic PRNG seed for Scheme random number generation.
+    pub fn set_random_seed(&self, seed: Option<u64>) {
+        let mut guard = self.rng.lock();
+        *guard = seed.map(rand::rngs::StdRng::seed_from_u64);
+    }
+
+    /// Returns a cloned handle to the shared dedicated MCP storage.
+    pub fn mcp_storage(&self) -> McpStorage {
+        self.mcp_storage.clone()
+    }
+
+    /// Returns the optional save file path.
+    pub fn save_file(&self) -> Option<&Path> {
+        self.save_file.as_deref()
     }
 
     /// Get thread-safe handle to the authoritative Flecs ECS World.
@@ -419,13 +800,19 @@ impl SchemeLogic {
         let json = match input {
             PlayerInput::Key {
                 code,
+                action,
                 shift,
                 ctrl,
                 alt,
             } => {
-                let mut map = serde_json::Map::with_capacity(5);
+                let mut map = serde_json::Map::with_capacity(6);
                 map.insert("type".to_string(), Value::String("key".to_string()));
                 map.insert("code".to_string(), Value::String(code.clone()));
+                let action_str = match action {
+                    crate::types::KeyAction::Down => "down",
+                    crate::types::KeyAction::Up => "up",
+                };
+                map.insert("action".to_string(), Value::String(action_str.to_string()));
                 map.insert("shift".to_string(), Value::Bool(*shift));
                 map.insert("ctrl".to_string(), Value::Bool(*ctrl));
                 map.insert("alt".to_string(), Value::Bool(*alt));
@@ -680,11 +1067,16 @@ impl SchemeLogic {
         Ok(true)
     }
 
-    /// Force immediate reload of all root `.scm` scripts in `scripts_dir` while preserving `*world-state*`.
-    /// Ignores `watch_scripts` setting and file modification timestamps.
-    pub fn force_reload(&mut self) -> Result<(), String> {
+    /// Force immediate reload of all root `.scm` scripts in `scripts_dir`.
+    ///
+    /// If `clean` is true, previous world state is discarded and `(engine:on-init)`
+    /// is invoked to initialize a fresh world.
+    /// If `clean` is false, previous world state is preserved and restored.
+    /// In either case, if compilation fails, the previous world state is safely restored.
+    pub fn force_reload(&mut self, clean: bool) -> Result<(), String> {
         tracing::info!(
             scripts_dir = %self.scripts_dir.display(),
+            clean,
             "Forcing immediate reload of Scheme scripts..."
         );
         let state = self.export_state().ok();
@@ -727,15 +1119,31 @@ impl SchemeLogic {
         // Re-probe hooks after successful script reload
         self.update_hook_registry();
 
-        if let Some(st) = state {
+        if clean {
+            if let Err(e) = self.app.call_function("engine:on-init", vec![]) {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to run engine:on-init during clean reload, restoring state"
+                );
+                if let Some(st) = state {
+                    let _ = self.import_state(&st);
+                }
+                return Err(format!("Failed to run engine:on-init during clean reload: {}", e));
+            }
+        } else if let Some(st) = state {
             let _ = self.import_state(&st);
         }
+
         if let Some(ref mut watcher) = self.watcher {
             let _ = watcher.check_modified();
         }
         self.extra_version = self.extra_version.wrapping_add(1);
 
-        tracing::info!("Scripts reloaded successfully with state preserved");
+        if clean {
+            tracing::info!("Scripts reloaded successfully with clean initial state");
+        } else {
+            tracing::info!("Scripts reloaded successfully with state preserved");
+        }
         Ok(())
     }
 
@@ -759,7 +1167,7 @@ impl SchemeLogic {
 
         if is_modified {
             tracing::info!("Script changes detected, reloading scripts...");
-            self.force_reload()
+            self.force_reload(false)
                 .map_err(|e| Box::new(std::io::Error::other(e)))?;
             return Ok(true);
         }
@@ -773,6 +1181,127 @@ impl SchemeLogic {
             .safe_call_function("engine:mcp-tools", vec![], 500)
             .map_err(|e| format!("engine:mcp-tools error: {}", e))?;
         steel_val_to_json(&val).map_err(|e| format!("mcp_list_tools json error: {}", e))
+    }
+
+    /// Evaluates a Scheme assertion expression with a watchdog timeout.
+    ///
+    /// If the expression evaluates to non-`#f` (or truthy), returns `Ok(value_json)`.
+    /// If the expression evaluates to `#f`, returns `Err("Assertion failed: expression evaluated to #f".to_string())`.
+    /// If an exception or timeout occurs, returns `Err(error_details)`.
+    pub fn eval_assertion(&mut self, code: &str, timeout_ms: u64) -> Result<Value, String> {
+        self.extra_version = self.extra_version.wrapping_add(1);
+        let wrapped_code = format!(
+            r#"(let ((__res (begin {})))
+                 (set! *__last_assertion_result* __res)
+                 (if (equal? __res #f)
+                     "__ASSERTION_FAILED_FALSE__"
+                     __res))"#,
+            code
+        );
+
+        match self.app.safe_eval(&wrapped_code, timeout_ms.max(1)) {
+            Ok(output_str) => {
+                let trimmed = output_str.trim();
+                let res_str = trimmed.strip_prefix("=> ").unwrap_or(trimmed);
+                if res_str == "\"__ASSERTION_FAILED_FALSE__\"" {
+                    return Err("Assertion failed: expression evaluated to #f".to_string());
+                }
+
+                if let Ok(val) = self.app.extract_value("*__last_assertion_result*") {
+                    match val {
+                        SteelVal::BoolV(false) => {
+                            Err("Assertion failed: expression evaluated to #f".to_string())
+                        }
+                        SteelVal::BoolV(true) => Ok(Value::Bool(true)),
+                        other => {
+                            steel_val_to_json(&other).or_else(|_| Ok(Value::String(other.to_string())))
+                        }
+                    }
+                } else if res_str == "#t" || res_str == "#true" {
+                    Ok(Value::Bool(true))
+                } else if let Ok(i) = res_str.parse::<i64>() {
+                    Ok(Value::Number(i.into()))
+                } else if let Ok(f) = res_str.parse::<f64>() {
+                    if let Some(n) = serde_json::Number::from_f64(f) {
+                        Ok(Value::Number(n))
+                    } else {
+                        Ok(Value::String(res_str.to_string()))
+                    }
+                } else if res_str.starts_with('"') && res_str.ends_with('"') && res_str.len() >= 2 {
+                    let unescaped = &res_str[1..res_str.len() - 1];
+                    Ok(Value::String(unescaped.to_string()))
+                } else {
+                    Ok(Value::String(res_str.to_string()))
+                }
+            }
+            Err(e) => Err(format!("Assertion error: {}", e)),
+        }
+    }
+
+    /// Evaluates a batch of Scheme assertion expressions under watchdog protection.
+    ///
+    /// Iterates over each expression, detects failures (including rich diff objects containing `passed: false`),
+    /// aggregates `total`, `passed`, and `failed` statistics, and returns a structured summary JSON.
+    pub fn eval_assertions(&mut self, exprs: &[String], timeout_ms: u64) -> Value {
+        let mut total = 0;
+        let mut passed = 0;
+        let mut failed = 0;
+        let mut results = Vec::new();
+        let mut failures = Vec::new();
+
+        for expr in exprs {
+            total += 1;
+            match self.eval_assertion(expr, timeout_ms) {
+                Ok(res_val) => {
+                    let is_failure = res_val
+                        .as_object()
+                        .and_then(|obj| obj.get("passed"))
+                        .and_then(|p| p.as_bool())
+                        == Some(false);
+
+                    if is_failure {
+                        failed += 1;
+                        let mut fail_item = match res_val.clone() {
+                            Value::Object(map) => map,
+                            _ => serde_json::Map::new(),
+                        };
+                        if !fail_item.contains_key("expr") {
+                            fail_item.insert("expr".to_string(), Value::String(expr.clone()));
+                        }
+                        let fail_val = Value::Object(fail_item);
+                        failures.push(fail_val.clone());
+                        results.push(fail_val);
+                    } else {
+                        passed += 1;
+                        results.push(serde_json::json!({
+                            "expr": expr,
+                            "passed": true,
+                            "result": res_val,
+                        }));
+                    }
+                }
+                Err(err) => {
+                    failed += 1;
+                    let fail_val = serde_json::json!({
+                        "expr": expr,
+                        "passed": false,
+                        "error": err,
+                    });
+                    failures.push(fail_val.clone());
+                    results.push(fail_val);
+                }
+            }
+        }
+
+        let all_passed = failed == 0;
+        serde_json::json!({
+            "total": total,
+            "passed": passed,
+            "failed": failed,
+            "all_passed": all_passed,
+            "results": results,
+            "failures": failures,
+        })
     }
 
     /// Invoke a Scheme MCP tool handler via `(engine:on-mcp-call name args)`.
@@ -801,5 +1330,130 @@ impl Drop for SchemeLogic {
                 eprintln!("Failed to save state on drop: {}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_project_json_value() {
+        let root = json!({
+            "players": {
+                "1": { "x": 10, "y": 20, "hp": 100, "gold": 50 },
+                "2": { "x": 30, "y": 40 }
+            },
+            "monsters": {
+                "boss_1": { "hp": 500, "name": "Dragon" }
+            },
+            "chunks": {
+                "0,0": { "tiles": [1, 2, 3] }
+            }
+        });
+
+        let paths = vec![
+            "players.1.x".to_string(),
+            "players.1.gold".to_string(),
+            "monsters.boss_1.hp".to_string(),
+            "nonexistent.field".to_string(),
+        ];
+
+        let projected = project_json_value(&root, &paths);
+
+        assert_eq!(projected["players"]["1"]["x"], 10);
+        assert_eq!(projected["players"]["1"]["gold"], 50);
+        assert_eq!(projected["players"]["1"].get("hp"), None);
+        assert_eq!(projected["monsters"]["boss_1"]["hp"], 500);
+        assert_eq!(projected["monsters"]["boss_1"].get("name"), None);
+        assert_eq!(projected.get("chunks"), None);
+        assert_eq!(projected.get("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_compute_json_diff_with_scope_and_excludes() {
+        let old_state = json!({
+            "players": {
+                "1": { "x": 5, "y": 10, "hp": 100 },
+                "2": { "x": 0, "y": 0 }
+            },
+            "chunks": {
+                "0,0": { "v": 1 },
+                "0,1": { "v": 2 }
+            },
+            "score": 10
+        });
+
+        let new_state = json!({
+            "players": {
+                "1": { "x": 6, "y": 10, "hp": 90 },
+                "2": { "x": 0, "y": 0 }
+            },
+            "chunks": {
+                "0,0": { "v": 99 },
+                "0,1": { "v": 2 }
+            },
+            "score": 20
+        });
+
+        // 1. Without prefix or excludes -> diffs everything
+        let diff_all = compute_json_diff(&old_state, &new_state);
+        assert_eq!(diff_all["changed"]["players.1.x"]["new"], 6);
+        assert_eq!(diff_all["changed"]["chunks.0,0.v"]["new"], 99);
+        assert_eq!(diff_all["changed"]["score"]["new"], 20);
+
+        // 2. With exclude_keys: ["chunks"] -> chunks skipped completely
+        let diff_no_chunks = compute_json_diff_scoped(&old_state, &new_state, None, Some(&["chunks"]));
+        assert_eq!(diff_no_chunks["changed"]["players.1.x"]["new"], 6);
+        assert_eq!(diff_no_chunks["changed"].get("chunks.0,0.v"), None);
+        assert_eq!(diff_no_chunks["changed"]["score"]["new"], 20);
+
+        // 3. With path_prefix: "players.1" -> only diffs players.1
+        let diff_scoped = compute_json_diff_scoped(&old_state, &new_state, Some("players.1"), None);
+        assert_eq!(diff_scoped["changed"]["players.1.x"]["old"], 5);
+        assert_eq!(diff_scoped["changed"]["players.1.x"]["new"], 6);
+        assert_eq!(diff_scoped["changed"]["players.1.hp"]["new"], 90);
+        assert_eq!(diff_scoped["changed"].get("score"), None);
+        assert_eq!(diff_scoped["changed"].get("chunks.0,0.v"), None);
+    }
+
+    #[test]
+    fn test_deterministic_prng_seed() {
+        let scripts_dir = PathBuf::from("scripts");
+        let mut logic = SchemeLogic::new(&scripts_dir, false, None).unwrap();
+
+        // Reseed with fixed seed 424242
+        logic.set_random_seed(Some(424242));
+        let num1 = logic.eval_repl("(engine:raw-random-int 1 1000000 424242)").unwrap();
+        let num2 = logic.eval_repl("(engine:raw-random-int 1 1000000 #f)").unwrap();
+
+        // Reseed with same seed 424242 -> should generate identical sequence
+        logic.set_random_seed(Some(424242));
+        let num1_repeat = logic.eval_repl("(engine:raw-random-int 1 1000000 424242)").unwrap();
+        let num2_repeat = logic.eval_repl("(engine:raw-random-int 1 1000000 #f)").unwrap();
+
+        assert_eq!(num1, num1_repeat);
+        assert_eq!(num2, num2_repeat);
+    }
+
+    #[test]
+    fn test_batch_assertions_and_rich_diff() {
+        let scripts_dir = PathBuf::from("scripts");
+        let mut logic = SchemeLogic::new(&scripts_dir, false, None).unwrap();
+        let _ = logic.init();
+
+        let exprs = vec![
+            "(= (+ 2 3) 5)".to_string(),
+            "(= (+ 2 2) 4)".to_string(),
+            "(= (+ 1 1) 99)".to_string(), // will fail
+        ];
+
+        let summary = logic.eval_assertions(&exprs, 1000);
+        assert_eq!(summary["total"], 3);
+        assert_eq!(summary["passed"], 2);
+        assert_eq!(summary["failed"], 1);
+        assert_eq!(summary["all_passed"], false);
+        assert_eq!(summary["failures"].as_array().unwrap().len(), 1);
     }
 }

@@ -10,6 +10,52 @@
 (define (bump-visual-version!)
   (set! *visual-version* (+ *visual-version* 1)))
 
+(define *current-tick* 0)
+(define (engine:set-current-tick! tick)
+  (set! *current-tick* tick))
+
+;; ----------------------------------------------------------------------------
+;; Deterministic Pseudo-Random Number Generation (PRNG) Wrappers
+;; ----------------------------------------------------------------------------
+
+(define (engine:random-int lo hi . rest)
+  (engine:raw-random-int lo hi (if (null? rest) #f (car rest))))
+
+(define (random:seed! n)
+  (engine:raw-random-int 0 0 n))
+
+(define (random:reset!)
+  (engine:raw-random-int 0 0 #f))
+
+(define (engine:seed-prng seed)
+  (engine:raw-random-int 0 0 seed))
+
+;; ----------------------------------------------------------------------------
+;; Rich Assertion Library
+;; ----------------------------------------------------------------------------
+
+(define (assert:equal actual expected . rest)
+  (let* ((label (if (null? rest) #f (car rest)))
+         (passed (equal? actual expected))
+         (res (if passed
+                  (hash "passed" #t "actual" actual "expected" expected)
+                  (hash "passed" #f "actual" actual "expected" expected
+                        "error" (string-append "Expected " (to-string expected) ", got " (to-string actual))))))
+    (if label
+        (hash-insert res "label" label)
+        res)))
+
+(define (assert:true condition . rest)
+  (let* ((label (if (null? rest) #f (car rest)))
+         (passed (if condition #t #f))
+         (res (if passed
+                  (hash "passed" #t "actual" condition "expected" #t)
+                  (hash "passed" #f "actual" condition "expected" #t
+                        "error" (string-append "Expected #t, got " (to-string condition))))))
+    (if label
+        (hash-insert res "label" label)
+        res)))
+
 ;; ----------------------------------------------------------------------------
 ;; Generic Helpers
 ;; ----------------------------------------------------------------------------
@@ -272,8 +318,9 @@
                     (hash "id" "potion" "name" "生命药水" "icon" "🧪" "count" 3))
       "dialog" #f
       "logs" (list
-               (hash "channel" "system" "text" "欢迎进入 TextCraft 3.0! (Scheme 驱动引擎)"))
-      "last_action_tick" 0)))
+               (hash "channel" "system" "text" "欢迎进入 TextCraft 3.0! (Scheme 驱动引擎)" "tick" 0))
+      "last_action_tick" 0
+      "pressed_keys" (hash))))
 
 (define (get-player player-id)
   (let* ((pid-key (to-string player-id))
@@ -322,7 +369,7 @@
 (define (engine:on-player-disconnect pid)
   (let ((p (get-player pid)))
     (if p
-        (set-player pid (hash-insert p "online" #f))
+        (set-player pid (hash-insert (hash-insert p "online" #f) "pressed_keys" (hash)))
         #f))
   'ok)
 
@@ -340,13 +387,61 @@
 (define (player:add-log player-id channel text)
   (let* ((p (ensure-player player-id))
          (old-logs (map-get p "logs" '()))
-         (new-log (hash "channel" channel "text" text))
+         (new-log (hash "channel" channel "text" text "tick" *current-tick*))
          (all-logs (append old-logs (list new-log)))
          (trimmed (if (> (length all-logs) 30)
                       (list-tail all-logs (- (length all-logs) 30))
                       all-logs))
          (p2 (hash-insert p "logs" trimmed)))
     (set-player player-id p2)))
+
+;; ----------------------------------------------------------------------------
+;; Player Keyboard State Management & Continuous Hold Tracking
+;; ----------------------------------------------------------------------------
+
+(define (player:handle-key-action! pid code action)
+  (let* ((p (ensure-player pid))
+         (pressed-keys (map-get p "pressed_keys" (hash)))
+         (code-str (if (string? code) code (to-string code)))
+         (action-str (if (string? action) action (to-string action))))
+    (if (or (string=? code-str "") (string=? code-str "false") (string=? code-str "#f"))
+        #f
+        (cond
+          ((or (equal? action-str "down") (equal? action-str "key_down") (equal? action-str "key"))
+           (let* ((cur-press-tick (map-get pressed-keys code-str #f))
+                  (new-pressed (if cur-press-tick
+                                   pressed-keys
+                                   (hash-insert pressed-keys code-str *current-tick*)))
+                  (p2 (hash-insert p "pressed_keys" new-pressed)))
+             (set-player pid p2)
+             #t))
+          ((or (equal? action-str "up") (equal? action-str "key_up"))
+           (let* ((new-pressed (hash-remove pressed-keys code-str))
+                  (p2 (hash-insert p "pressed_keys" new-pressed)))
+             (set-player pid p2)
+             #t))
+          (else #f)))))
+
+(define (player:key-pressed? pid code)
+  (let* ((p (get-player pid)))
+    (if p
+        (let* ((pressed-keys (map-get p "pressed_keys" (hash)))
+               (code-str (if (string? code) code (to-string code))))
+          (if (hash-contains? pressed-keys code-str)
+              #t
+              #f))
+        #f)))
+
+(define (player:key-hold-ticks pid code)
+  (let* ((p (get-player pid)))
+    (if p
+        (let* ((pressed-keys (map-get p "pressed_keys" (hash)))
+               (code-str (if (string? code) code (to-string code)))
+               (start-tick (map-get pressed-keys code-str #f)))
+          (if (number? start-tick)
+              (max 0 (- *current-tick* start-tick))
+              0))
+        0)))
 
 ;; ----------------------------------------------------------------------------
 ;; Read-Only HUD Builder
@@ -682,4 +777,88 @@
 
 (define (covered-with? a b)
   (equal? (ecs:target a "CoveredWith") b))
+
+;; ----------------------------------------------------------------------------
+;; Dedicated MCP Storage & Blackboard Scheme Wrappers
+;; ----------------------------------------------------------------------------
+
+(define (mcp-store:set! key val . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-set! key val ns)))
+
+(define (mcp-store:get key . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-get key ns)))
+
+(define (mcp-store:list . rest)
+  (let ((ns (if (null? rest) "" (car rest))))
+    (engine:raw-mcp-store-list ns)))
+
+(define (mcp-store:delete! key . rest)
+  (let ((ns (if (null? rest) "default" (car rest))))
+    (engine:raw-mcp-store-delete! key ns)))
+
+;; Scheme bridge aliases
+(define (engine:mcp-store-get key . rest)
+  (apply mcp-store:get (cons key rest)))
+
+(define (engine:mcp-store-set key val . rest)
+  (apply mcp-store:set! (cons key (cons val rest))))
+
+(define (engine:mcp-store-keys . rest)
+  (apply mcp-store:list rest))
+
+(define (engine:mcp-store-delete key . rest)
+  (apply mcp-store:delete! (cons key rest)))
+
+;; ----------------------------------------------------------------------------
+;; In-Scheme Checkpoint & Time-Travel Engine (Backed by Dedicated MCP Storage)
+;; ----------------------------------------------------------------------------
+
+(define (checkpoint:save tag)
+  (let* ((str-tag (if (string? tag) tag (to-string tag)))
+         (safe-tag (if (string=? str-tag "") "latest" str-tag)))
+    (engine:raw-mcp-store-set! safe-tag *world-state* "checkpoint")
+    safe-tag))
+
+(define (checkpoint:restore tag)
+  (let* ((str-tag (if (string? tag) tag (to-string tag)))
+         (safe-tag (if (string=? str-tag "") "latest" str-tag))
+         (saved (engine:raw-mcp-store-get safe-tag "checkpoint")))
+    (if saved
+        (begin
+          (set! *world-state* saved)
+          (bump-visual-version!)
+          #t)
+        #f)))
+
+;; Expose create_checkpoint and rollback_checkpoint dynamically via mcp:def-tool
+(mcp:def-tool
+  "create_checkpoint"
+  "Scheme 脚本自驱动时光机：在专用 MCP 存储中保存当前游戏世界状态快照 (Checkpoint)"
+  (hash "type" "object"
+        "properties" (hash "tag" (hash "type" "string" "description" "快照标签名称 (默认 'latest')")))
+  (lambda (args)
+    (let* ((tag (map-get args "tag" "latest"))
+           (saved-tag (checkpoint:save tag)))
+      (hash "success" #t
+            "tag" saved-tag
+            "namespace" "checkpoint"
+            "message" (string-append "Checkpoint '" saved-tag "' saved to dedicated mcp-store successfully")))))
+
+(mcp:def-tool
+  "rollback_checkpoint"
+  "Scheme 脚本自驱动时光机：从专用 MCP 存储中瞬间回滚游戏世界状态"
+  (hash "type" "object"
+        "properties" (hash "tag" (hash "type" "string" "description" "要回滚的快照标签名称 (默认 'latest')")))
+  (lambda (args)
+    (let* ((tag (map-get args "tag" "latest"))
+           (ok (checkpoint:restore tag)))
+      (if ok
+          (hash "success" #t
+                "tag" tag
+                "message" (string-append "Successfully rolled back to checkpoint '" tag "'"))
+          (hash "success" #f
+                "error" (string-append "Checkpoint '" tag "' not found in mcp-store"))))))
+
 

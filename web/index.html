@@ -193,7 +193,8 @@
                 code: String(code),
                 shift: Boolean(mods.shift),
                 ctrl: Boolean(mods.ctrl),
-                alt: Boolean(mods.alt)
+                alt: Boolean(mods.alt),
+                action: mods.action || 'down'
               }
             }
           });
@@ -641,7 +642,17 @@
         if (e.code === 'KeyW' || e.code === 'KeyA' || e.code === 'KeyS' || e.code === 'KeyD' || e.code.startsWith('Arrow') || e.code === 'Space') {
           e.preventDefault();
         }
-        TextCraft.sendKey(e.code, { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
+        TextCraft.sendKey(e.code, { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, action: 'down' });
+      });
+
+      window.addEventListener('keyup', (e) => {
+        if (document.activeElement === cmdInputEl) {
+          return;
+        }
+        if (e.code === 'KeyW' || e.code === 'KeyA' || e.code === 'KeyS' || e.code === 'KeyD' || e.code.startsWith('Arrow') || e.code === 'Space') {
+          e.preventDefault();
+        }
+        TextCraft.sendKey(e.code, { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, action: 'up' });
       });
 
       window.addEventListener('hashchange', () => {

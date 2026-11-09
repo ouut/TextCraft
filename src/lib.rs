@@ -4,10 +4,10 @@ pub mod runtime;
 pub mod types;
 
 pub use clap;
-pub use logic::{OutboundMessage, SchemeLogic};
+pub use logic::{compute_json_diff, compute_json_diff_scoped, OutboundMessage, SchemeLogic};
 pub use runtime::{
-    run_server, run_server_with_handle, strip_ansi_codes, LogLevel, ServerArgs, ServerHandleExt,
-    TextCraftServer, EMBEDDED_WEB_ASSETS,
+    resolve_namespace_and_key, run_server, run_server_with_handle, strip_ansi_codes, LogLevel,
+    McpStorage, ServerArgs, ServerHandleExt, TextCraftServer, EMBEDDED_WEB_ASSETS,
 };
 pub use types::*;
 
@@ -57,6 +57,7 @@ mod tests {
         // 5. Input
         let key_input = PlayerInput::Key {
             code: "KeyW".to_string(),
+            action: Default::default(),
             shift: false,
             ctrl: false,
             alt: false,
@@ -109,6 +110,56 @@ mod tests {
             let state = logic2.export_state().expect("Export state failed");
             assert!(state.is_object());
         }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_scheme_logic_force_reload_clean_and_rollback() {
+        let temp_dir = std::env::temp_dir().join(format!("textcraft_test_reload_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let scripts_dir = PathBuf::from("scripts");
+        let dir = if scripts_dir.exists() {
+            scripts_dir
+        } else {
+            PathBuf::from("../../scripts")
+        };
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let p = entry.path();
+            if p.is_file() {
+                std::fs::copy(&p, temp_dir.join(entry.file_name())).unwrap();
+            }
+        }
+
+        let mut logic = SchemeLogic::new(&temp_dir, false, None).expect("SchemeLogic create failed");
+        logic.init().expect("SchemeLogic init failed");
+
+        // Modify world state
+        logic.on_player_join(1, "token_1").expect("join failed");
+        logic.eval_repl("(set-player 1 (hash-insert (ensure-player 1) \"gold\" 1234))").expect("eval failed");
+        let state1 = logic.export_state().expect("export failed");
+        assert_eq!(state1["players"]["1"]["gold"], 1234);
+
+        // 1. Lossless reload (clean = false) preserves gold
+        logic.force_reload(false).expect("force_reload false failed");
+        let state2 = logic.export_state().expect("export failed");
+        assert_eq!(state2["players"]["1"]["gold"], 1234);
+
+        // 2. Syntax error in a script causes compilation error and preserves state
+        let bad_file = temp_dir.join("broken.scm");
+        std::fs::write(&bad_file, "(define broken (").unwrap();
+        let err = logic.force_reload(false).unwrap_err();
+        assert!(err.contains("Failed to compile"));
+        let state3 = logic.export_state().expect("export failed");
+        assert_eq!(state3["players"]["1"]["gold"], 1234, "State should be restored on compilation failure");
+        std::fs::remove_file(&bad_file).unwrap();
+
+        // 3. Clean reload (clean = true) resets world state
+        logic.force_reload(true).expect("force_reload true failed");
+        let state4 = logic.export_state().expect("export failed");
+        assert!(state4["players"].get("1").is_none(), "Players should be cleared on clean reload");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

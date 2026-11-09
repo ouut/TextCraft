@@ -332,6 +332,7 @@
   'ok)
 
 (define (engine:on-tick dt tick-id)
+  (set! *current-tick* tick-id)
   (let* ((old-ticks (map-get *world-state* "tick_count" 0))
          (old-elapsed (map-get *world-state* "elapsed_sec" 0.0))
          (old-idle (map-get *world-state* "idle_timer" 0.0))
@@ -449,10 +450,12 @@
 
 (define (engine:on-input pid input-map)
   (touch-activity!)
-  (let* ((p (ensure-player pid))
-         (atype (map-get input-map "type" ""))
-         (code (map-get input-map "code" "")))
-    (if (or (equal? atype "key") (equal? atype "key_down"))
+  (let* ((atype (map-get input-map "type" "key"))
+         (code (map-get input-map "code" ""))
+         (action (map-get input-map "action" "down")))
+    (player:handle-key-action! pid code action)
+    (if (and (or (equal? atype "key") (equal? atype "key_down") (equal? atype "key_up") (equal? atype ""))
+             (or (equal? action "down") (equal? action "key") (equal? action "key_down")))
         (let ((dx 0) (dy 0) (is-move #f))
           (cond
             ((or (equal? code "KeyW") (equal? code "ArrowUp") (equal? code "w") (equal? code "k"))
@@ -469,7 +472,8 @@
             (else #f))
 
           (if is-move
-              (let* ((cur-x (map-get p "x" 0))
+              (let* ((p (ensure-player pid))
+                     (cur-x (map-get p "x" 0))
                      (cur-y (map-get p "y" 0))
                      (nx (+ cur-x dx))
                      (ny (+ cur-y dy))
