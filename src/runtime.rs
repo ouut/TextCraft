@@ -118,6 +118,10 @@ pub struct ServerArgs {
     #[arg(long, default_value_t = 30)]
     pub autosave_sec: u64,
 
+    /// Heartbeat timeout in seconds before an active session enters the grace period
+    #[arg(long, default_value_t = 30)]
+    pub heartbeat_timeout_secs: u64,
+
     /// Snapshot heartbeat interval in milliseconds (guarantees periodic snapshot even if unchanged; 0 disables deduplication)
     #[arg(long, default_value_t = 1000)]
     pub snapshot_heartbeat_ms: u64,
@@ -125,6 +129,10 @@ pub struct ServerArgs {
     /// Optional HTTP port for Model Context Protocol (MCP) JSON-RPC 2.0 server (e.g. 8082)
     #[arg(long)]
     pub mcp_port: Option<u16>,
+
+    /// Custom directory for serving web client static assets (overrides embedded assets)
+    #[arg(long)]
+    pub web_dir: Option<PathBuf>,
 }
 
 type McpRequestMsg = (
@@ -247,7 +255,43 @@ impl TextCraftServer {
     /// Starts the server instance with parsed CLI arguments.
     pub async fn start(args: ServerArgs) -> Result<Self, Box<dyn std::error::Error>> {
         let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
-        let config = ServerConfig::new(addr).with_embedded_assets(&EMBEDDED_WEB_ASSETS);
+
+        // Resolve web static assets priority:
+        // 1. Explicit --web-dir if provided and exists
+        // 2. Local ./web directory if present in current working directory or adjacent to exe
+        // 3. Fallback to embedded static assets
+        let exe_dir_web = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("web")));
+        let config = ServerConfig::new(addr).with_heartbeat_timeout_secs(args.heartbeat_timeout_secs);
+        let config = if let Some(ref dir) = args.web_dir {
+            if dir.is_dir() {
+                tracing::info!(path = %dir.display(), "Using custom web assets directory from --web-dir");
+                config.with_static_dir(dir)
+            } else {
+                tracing::warn!(path = %dir.display(), "Specified --web-dir does not exist, falling back to auto-detection");
+                if PathBuf::from("web").is_dir() {
+                    tracing::info!("Detected local ./web directory, using external web assets");
+                    config.with_static_dir("web")
+                } else if let Some(ref exe_web) = exe_dir_web.filter(|p| p.is_dir()) {
+                    tracing::info!(path = %exe_web.display(), "Detected adjacent web directory, using external web assets");
+                    config.with_static_dir(exe_web)
+                } else {
+                    tracing::info!("Using embedded web assets (zero-dependency)");
+                    config.with_embedded_assets(&EMBEDDED_WEB_ASSETS)
+                }
+            }
+        } else if PathBuf::from("web").is_dir() {
+            tracing::info!("Detected local ./web directory, using external web assets");
+            config.with_static_dir("web")
+        } else if let Some(ref exe_web) = exe_dir_web.filter(|p| p.is_dir()) {
+            tracing::info!(path = %exe_web.display(), "Detected adjacent web directory, using external web assets");
+            config.with_static_dir(exe_web)
+        } else {
+            tracing::info!("Using embedded web assets (zero-dependency)");
+            config.with_embedded_assets(&EMBEDDED_WEB_ASSETS)
+        };
+
         let mut logic = SchemeLogic::new(args.scripts_dir, args.watch, args.save_file)?;
         logic.init()?;
 
@@ -1221,4 +1265,9 @@ impl TextCraftServer {
 pub async fn run_server(args: ServerArgs) -> Result<(), Box<dyn std::error::Error>> {
     let server = TextCraftServer::start(args).await?;
     server.run_loop().await
+}
+
+/// Convenience function to start the server returning TextCraftServer (which exposes its ServerHandle).
+pub async fn run_server_with_handle(args: ServerArgs) -> Result<TextCraftServer, Box<dyn std::error::Error>> {
+    TextCraftServer::start(args).await
 }
