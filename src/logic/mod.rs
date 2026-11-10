@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use parking_lot::Mutex;
-use rand::{Rng, SeedableRng};
 use serde_json::Value;
 use steel::rvals::SteelVal;
 use steel::steel_vm::register_fn::RegisterFn;
@@ -15,6 +14,8 @@ use crate::types::{resolve_namespace_and_key, McpStorage, PlayerInput, PlayerSna
 use flecs_ecs::prelude::*;
 
 pub mod ecs_ffi;
+pub mod prng;
+pub mod snapshot;
 pub use ecs_ffi::*;
 
 /// Known standard engine lifecycle and event hooks.
@@ -352,7 +353,13 @@ pub struct SchemeLogic {
     ecs_world: Arc<Mutex<EcsWorld>>,
     rasterizer: Arc<Mutex<ViewportRasterizer>>,
     pub mcp_storage: McpStorage,
-    rng: Arc<parking_lot::Mutex<Option<rand::rngs::StdRng>>>,
+    /// The one and only random source (guide item 3): serializable
+    /// xoshiro256++ whose state is part of snapshot v2. No `StdRng`,
+    /// no `thread_rng` fallback anywhere in the host.
+    prng: Arc<parking_lot::Mutex<prng::Prng>>,
+    /// Model manifest (guide item 7); populated in `init()` from
+    /// `model.json` when present, otherwise defaults are derived.
+    pub model_manifest: snapshot::ModelManifest,
 }
 
 impl SchemeLogic {
@@ -396,7 +403,7 @@ impl SchemeLogic {
         let ecs_world = Arc::new(Mutex::new(EcsWorld::new()));
         let rasterizer = Arc::new(Mutex::new(ViewportRasterizer::new()));
         let mcp_storage: McpStorage = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
-        let rng = Arc::new(parking_lot::Mutex::new(None::<rand::rngs::StdRng>));
+        let prng = Arc::new(parking_lot::Mutex::new(prng::Prng::default()));
 
         // Register ECS primitives
         ecs_ffi::register_ecs_primitives(
@@ -436,50 +443,64 @@ impl SchemeLogic {
             },
         );
 
-        let rng_for_raw = Arc::clone(&rng);
+        // Random draws go through the serializable xoshiro256++ PRNG
+        // (guide item 3). There is NO system-entropy fallback anywhere:
+        // the default state is seed 0. Interface semantics preserved:
+        // passing a seed reseeds and draws once from the fresh stream
+        // (a degenerate lo==hi range draws nothing); `(raw-random-int
+        // 0 0 #f)` resets to the deterministic seed-0 state.
+        let prng_for_raw = Arc::clone(&prng);
         app.engine.register_fn(
             "engine:raw-random-int",
             move |lo: isize, hi: isize, seed_val: SteelVal| -> isize {
-                let (min, max) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-                let mut guard = rng_for_raw.lock();
+                let mut guard = prng_for_raw.lock();
                 match seed_val {
                     SteelVal::IntV(s) => {
-                        let mut r = rand::rngs::StdRng::seed_from_u64(s as u64);
-                        let val = if min == max { min } else { r.gen_range(min..=max) };
-                        *guard = Some(r);
-                        val
+                        *guard = prng::Prng::from_seed(s as u64);
+                        guard.next_range_inclusive(lo, hi)
                     }
                     SteelVal::NumV(n) => {
-                        let mut r = rand::rngs::StdRng::seed_from_u64(n as u64);
-                        let val = if min == max { min } else { r.gen_range(min..=max) };
-                        *guard = Some(r);
-                        val
+                        *guard = prng::Prng::from_seed(n as u64);
+                        guard.next_range_inclusive(lo, hi)
                     }
                     SteelVal::BoolV(false) if lo == 0 && hi == 0 => {
-                        *guard = None;
+                        *guard = prng::Prng::from_seed(0);
                         0
                     }
-                    _ => {
-                        if let Some(ref mut r) = *guard {
-                            if min == max { min } else { r.gen_range(min..=max) }
-                        } else {
-                            if min == max { min } else { rand::thread_rng().gen_range(min..=max) }
-                        }
-                    }
+                    _ => guard.next_range_inclusive(lo, hi),
                 }
             },
         );
 
-        let rng_for_rand = Arc::clone(&rng);
+        let prng_for_rand = Arc::clone(&prng);
         app.engine.register_fn(
             "engine:random-int",
             move |lo: isize, hi: isize| -> isize {
-                let (min, max) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-                let mut guard = rng_for_rand.lock();
-                if let Some(ref mut r) = *guard {
-                    if min == max { min } else { r.gen_range(min..=max) }
+                prng_for_rand.lock().next_range_inclusive(lo, hi)
+            },
+        );
+
+        // PRNG snapshot accessors: state is an opaque comma-joined string of
+        // the four u64 words (u64 does not fit Steel's isize IntV in general).
+        let prng_get = Arc::clone(&prng);
+        app.engine.register_fn("engine:prng-state", move || -> String {
+            let s = prng_get.lock().state();
+            format!("{},{},{},{}", s[0], s[1], s[2], s[3])
+        });
+        let prng_set = Arc::clone(&prng);
+        app.engine.register_fn(
+            "engine:set-prng-state!",
+            move |text: SteelVal| -> bool {
+                let text = steel_to_string(&text);
+                let parts: Vec<u64> = text
+                    .split(',')
+                    .filter_map(|p| p.trim().parse::<u64>().ok())
+                    .collect();
+                if parts.len() == 4 {
+                    prng_set.lock().set_state([parts[0], parts[1], parts[2], parts[3]]);
+                    true
                 } else {
-                    if min == max { min } else { rand::thread_rng().gen_range(min..=max) }
+                    false
                 }
             },
         );
@@ -599,14 +620,29 @@ impl SchemeLogic {
             ecs_world,
             rasterizer,
             mcp_storage,
-            rng,
+            prng,
+            model_manifest: snapshot::ModelManifest::default(),
         })
     }
 
     /// Sets or resets deterministic PRNG seed for Scheme random number generation.
     pub fn set_random_seed(&self, seed: Option<u64>) {
-        let mut guard = self.rng.lock();
-        *guard = seed.map(rand::rngs::StdRng::seed_from_u64);
+        *self.prng.lock() = prng::Prng::from_seed(seed.unwrap_or(0));
+    }
+
+    /// Current serializable PRNG state (snapshot v2 `prng.state`).
+    pub fn prng_state(&self) -> [u64; 4] {
+        self.prng.lock().state()
+    }
+
+    /// Restore a serializable PRNG state previously exported.
+    pub fn set_prng_state(&self, state: [u64; 4]) {
+        self.prng.lock().set_state(state);
+    }
+
+    /// Directory the current model was loaded from.
+    pub fn scripts_dir(&self) -> &Path {
+        &self.scripts_dir
     }
 
     /// Returns a cloned handle to the shared dedicated MCP storage.
@@ -636,6 +672,8 @@ impl SchemeLogic {
 
     /// Load all `.scm` scripts in order (`prelude.scm` first, `main.scm` last), call `(engine:on-init)` if present, and restore save file if present.
     pub fn init(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Model manifest (item 7): missing file -> derived defaults.
+        self.model_manifest = snapshot::ModelManifest::load(&self.scripts_dir);
         let entries = std::fs::read_dir(&self.scripts_dir)?;
         let mut files: Vec<PathBuf> = entries
             .filter_map(|e| e.ok().map(|entry| entry.path()))
@@ -1014,7 +1052,193 @@ impl SchemeLogic {
         Ok(())
     }
 
+    /// Assemble a snapshot v2 (guide 4.2): the single snapshot boundary
+    /// covering `*world-state*`, the full Flecs world, the PRNG state and
+    /// the authoritative tick (`world_state.tick_count`).
+    pub fn export_snapshot_v2(&mut self) -> Result<Value, String> {
+        let world_state = self.export_state()?;
+        let tick = world_state
+            .get("tick_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let ecs_world = self.ecs_world.lock().export_world_json();
+        let prng_state = self.prng_state();
+        Ok(serde_json::json!({
+            "format": "textcraft-snapshot",
+            "version": 2,
+            "model": {
+                "name": self.model_manifest.name,
+                "state_schema": self.model_manifest.state_schema,
+                "scripts_hash": snapshot::scripts_hash(&self.scripts_dir),
+            },
+            "tick": tick,
+            "prng": {
+                "algo": "xoshiro256++",
+                "state": prng_state,
+            },
+            "world_state": world_state,
+            "ecs_world": ecs_world,
+        }))
+    }
+
+    /// Restore a snapshot v2 produced by `export_snapshot_v2` (or by the
+    /// Scheme `checkpoint:save`, which assembles the same shape).
+    ///
+    /// Validation (format / version / model name / state_schema) happens
+    /// before any state is touched. Restore order per guide 4.2:
+    /// ECS -> world_state -> prng -> tick (tick rides inside world_state).
+    /// Returns the entity id_map (identity when ids were preserved).
+    pub fn import_snapshot_v2(
+        &mut self,
+        data: &Value,
+    ) -> Result<std::collections::HashMap<u64, u64>, String> {
+        if let Some(fmt) = data.get("format").and_then(|v| v.as_str()) {
+            if fmt != "textcraft-snapshot" {
+                return Err(format!("unsupported snapshot format: {}", fmt));
+            }
+        }
+        match data.get("version").and_then(|v| v.as_u64()) {
+            Some(2) => {}
+            Some(v) => {
+                return Err(format!(
+                    "unsupported snapshot version: {} (expected 2; v1 checkpoints are not silently compatible)",
+                    v
+                ))
+            }
+            None => {
+                return Err(
+                    "unsupported snapshot version: missing (expected 2; v1 checkpoints are not silently compatible)"
+                        .to_string(),
+                )
+            }
+        }
+        if let Some(model) = data.get("model") {
+            if let Some(name) = model.get("name").and_then(|v| v.as_str()) {
+                if name != self.model_manifest.name {
+                    return Err(format!(
+                        "snapshot model mismatch: snapshot is for '{}', current model is '{}'",
+                        name, self.model_manifest.name
+                    ));
+                }
+            }
+            if let Some(schema) = model.get("state_schema").and_then(|v| v.as_u64()) {
+                if schema != self.model_manifest.state_schema {
+                    return Err(format!(
+                        "snapshot state_schema mismatch: snapshot {}, current model {}",
+                        schema, self.model_manifest.state_schema
+                    ));
+                }
+            }
+        }
+        let world_state = data
+            .get("world_state")
+            .cloned()
+            .ok_or_else(|| "snapshot missing 'world_state'".to_string())?;
+        if !world_state.is_object() {
+            return Err("snapshot 'world_state' must be an object".to_string());
+        }
+        let ecs_data = data
+            .get("ecs_world")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({ "entities": [] }));
+        // Parse the PRNG state up front so a malformed snapshot fails
+        // before any mutation (guide 4.2: validate in a temp structure,
+        // then switch).
+        let prng_parsed: Option<[u64; 4]> = match data.get("prng") {
+            None => None,
+            Some(p) => {
+                if let Some(s) = p.get("state").and_then(|v| v.as_str()) {
+                    let parts: Vec<u64> = s
+                        .split(',')
+                        .filter_map(|x| x.trim().parse::<u64>().ok())
+                        .collect();
+                    if parts.len() != 4 {
+                        return Err("snapshot prng.state string must have 4 words".into());
+                    }
+                    Some([parts[0], parts[1], parts[2], parts[3]])
+                } else if let Some(arr) = p.get("state").and_then(|v| v.as_array()) {
+                    if arr.len() != 4 {
+                        return Err("snapshot prng.state must have 4 words".into());
+                    }
+                    let mut st = [0u64; 4];
+                    for (i, x) in arr.iter().enumerate() {
+                        st[i] = x
+                            .as_u64()
+                            .ok_or_else(|| "snapshot prng.state words must be u64".to_string())?;
+                    }
+                    Some(st)
+                } else {
+                    return Err("snapshot prng.state missing".into());
+                }
+            }
+        };
+
+        // 1. ECS (import_world_json validates before clearing).
+        let id_map = self.ecs_world.lock().import_world_json(&ecs_data)?;
+        let non_identity = id_map.iter().any(|(a, b)| a != b);
+        if non_identity {
+            // NOTE: no registered entity-reference fields exist inside
+            // *world-state* (players/monsters use string ids + coords;
+            // see state_inventory.md), so there is nothing to rewrite.
+            tracing::warn!(?id_map, "snapshot import remapped entity ids");
+        }
+        // 2. world_state via the model's import hook.
+        self.import_state(&world_state)?;
+        // 3. PRNG.
+        if let Some(st) = prng_parsed {
+            self.set_prng_state(st);
+        }
+        // 4. tick: carried by world_state.tick_count (authoritative clock).
+        self.increment_extra_version();
+        Ok(id_map)
+    }
+
+    /// Host checkpoint (scope ruling: checkpoints are a HOST feature, not
+    /// model script logic). Stores a snapshot v2 in the MCP blackboard
+    /// under the `checkpoint` namespace — the blackboard is only the
+    /// storage medium; it is not itself part of the snapshot.
+    pub fn create_checkpoint(&mut self, tag: &str) -> Result<String, String> {
+        let safe_tag = if tag.trim().is_empty() { "latest" } else { tag.trim() };
+        let snap = self.export_snapshot_v2()?;
+        let (ns, sub) = resolve_namespace_and_key(Some("checkpoint"), safe_tag);
+        self.mcp_storage
+            .write()
+            .insert(format!("{}:{}", ns, sub), snap);
+        Ok(safe_tag.to_string())
+    }
+
+    /// Roll back to a host checkpoint. Returns Ok(false) when the tag does
+    /// not exist; a stored value that is not a snapshot v2 (e.g. a legacy
+    /// model-local stash) is an explicit version error.
+    pub fn rollback_checkpoint(&mut self, tag: &str) -> Result<bool, String> {
+        let safe_tag = if tag.trim().is_empty() { "latest" } else { tag.trim() };
+        let (ns, sub) = resolve_namespace_and_key(Some("checkpoint"), safe_tag);
+        let stored = self
+            .mcp_storage
+            .read()
+            .get(&format!("{}:{}", ns, sub))
+            .cloned();
+        let Some(snap) = stored else {
+            return Ok(false);
+        };
+        if snap.get("format").and_then(|v| v.as_str()) != Some("textcraft-snapshot") {
+            return Err(
+                "unsupported checkpoint version: stored value is not a textcraft-snapshot v2"
+                    .to_string(),
+            );
+        }
+        self.import_snapshot_v2(&snap)?;
+        Ok(true)
+    }
+
+    /// State hash (guide 4.4): SHA-256 of the canonical snapshot v2 JSON.
+    pub fn state_hash(&mut self) -> Result<String, String> {
+        let snap = self.export_snapshot_v2()?;
+        Ok(snapshot::hash_json(&snap))
+    }
+
     /// Atomically save world state to disk using `.tmp` and rename.
+    /// Save files use the snapshot v2 format (guide item 2.4).
     pub fn save_state_to_file(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let save_path = match &self.save_file {
             Some(p) => p.clone(),
@@ -1022,7 +1246,7 @@ impl SchemeLogic {
         };
 
         let state = self
-            .export_state()
+            .export_snapshot_v2()
             .map_err(std::io::Error::other)?;
 
         if let Some(parent) = save_path.parent() {
@@ -1060,8 +1284,15 @@ impl SchemeLogic {
 
         let content = std::fs::read_to_string(&save_path)?;
         let json: Value = serde_json::from_str(&content)?;
-        self.import_state(&json)
-            .map_err(std::io::Error::other)?;
+        if json.get("format").and_then(|v| v.as_str()) == Some("textcraft-snapshot") {
+            // Snapshot v2 save file.
+            self.import_snapshot_v2(&json)
+                .map_err(std::io::Error::other)?;
+        } else {
+            // Legacy v1 save file: bare *world-state* JSON (world_state only).
+            self.import_state(&json)
+                .map_err(std::io::Error::other)?;
+        }
 
         tracing::debug!(path = %save_path.display(), "Game state loaded from save file");
         Ok(true)
@@ -1420,7 +1651,7 @@ mod tests {
 
     #[test]
     fn test_deterministic_prng_seed() {
-        let scripts_dir = PathBuf::from("scripts");
+        let scripts_dir = PathBuf::from("models/roguelike");
         let mut logic = SchemeLogic::new(&scripts_dir, false, None).unwrap();
 
         // Reseed with fixed seed 424242
@@ -1439,7 +1670,7 @@ mod tests {
 
     #[test]
     fn test_batch_assertions_and_rich_diff() {
-        let scripts_dir = PathBuf::from("scripts");
+        let scripts_dir = PathBuf::from("models/roguelike");
         let mut logic = SchemeLogic::new(&scripts_dir, false, None).unwrap();
         let _ = logic.init();
 

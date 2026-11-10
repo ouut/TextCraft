@@ -13,11 +13,11 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 fn get_scripts_dir() -> PathBuf {
-    let p = PathBuf::from("scripts");
+    let p = PathBuf::from("models/roguelike");
     if p.exists() {
         p
     } else {
-        PathBuf::from("../../scripts")
+        PathBuf::from("../../models/roguelike")
     }
 }
 

@@ -7,11 +7,11 @@ use serde_json::json;
 use textcraft::{SchemeLogic, TextCraftServer, EMBEDDED_WEB_ASSETS};
 
 fn get_scripts_dir() -> PathBuf {
-    let p = PathBuf::from("scripts");
+    let p = PathBuf::from("models/roguelike");
     if p.exists() {
         p
     } else {
-        PathBuf::from("../../scripts")
+        PathBuf::from("../../models/roguelike")
     }
 }
 
@@ -407,8 +407,12 @@ async fn test_checkpoint_and_time_travel_rollback() {
     let stored_cp = server.mcp_store_get_scoped(Some("checkpoint"), "initial");
     assert!(stored_cp.is_some(), "Checkpoint 'initial' must be stored in mcp-store under 'checkpoint' namespace");
     let cp_val = stored_cp.unwrap();
-    assert!(cp_val.get("players").is_some());
-    assert_eq!(cp_val["players"]["1"]["x"], init_x);
+    // Snapshot v2 shape (guide item 2): world_state is nested in the wrapper.
+    assert_eq!(cp_val["format"], "textcraft-snapshot");
+    assert_eq!(cp_val["version"], 2);
+    assert!(cp_val["world_state"].get("players").is_some());
+    assert_eq!(cp_val["world_state"]["players"]["1"]["x"], init_x);
+    assert!(cp_val["ecs_world"]["entities"].is_array());
 
     // 3. Advance simulation and modify game state: step 20 ticks, inject move KeyD
     for _ in 0..20 {
@@ -460,7 +464,7 @@ async fn test_checkpoint_and_time_travel_rollback() {
 
     let stored_after = server.mcp_store_get_scoped(Some("checkpoint"), "after_move");
     assert!(stored_after.is_some());
-    assert_eq!(stored_after.unwrap()["players"]["1"]["x"], moved_x);
+    assert_eq!(stored_after.unwrap()["world_state"]["players"]["1"]["x"], moved_x);
 
     let cp_keys = server.mcp_store_list_scoped(Some("checkpoint"), None);
     assert!(cp_keys.contains(&"initial".to_string()));

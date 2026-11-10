@@ -440,6 +440,31 @@ pub fn register_ecs_primitives(
         }
     });
 
+    // Snapshot v2 (guide item 2): full ECS world export / import.
+    let e_export = Arc::clone(&ecs);
+    engine.register_fn("ecs:export-world", move || -> SteelVal {
+        let json = e_export.lock().export_world_json();
+        json_to_steel_val(&json)
+    });
+
+    let e_import = Arc::clone(&ecs);
+    engine.register_fn("ecs:import-world", move |data: SteelVal| -> SteelVal {
+        let json = match steel_val_to_json(&data) {
+            Ok(j) => j,
+            Err(_) => return SteelVal::BoolV(false),
+        };
+        match e_import.lock().import_world_json(&json) {
+            Ok(id_map) => {
+                let mut map = std::collections::HashMap::new();
+                for (old, new) in id_map {
+                    map.insert(old.to_string(), serde_json::json!(new));
+                }
+                json_to_steel_val(&serde_json::Value::Object(map.into_iter().collect()))
+            }
+            Err(_) => SteelVal::BoolV(false),
+        }
+    });
+
     let e_sess = Arc::clone(&ecs);
     engine.register_fn(
         "__ecs:set-player-session",

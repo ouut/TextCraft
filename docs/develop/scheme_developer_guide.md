@@ -652,3 +652,32 @@ TextCraft 4.0 原生集成了 **Model Context Protocol (MCP)** JSON-RPC 2.0 管�
    磁盘存档序列化只支持纯数据。逻辑回调请放在注册表中通过字符串 ID 检索。
 5. **修改画面后调用 `(bump-visual-version!)`**：
    若通过原生 Scheme 字典修改了影响画面的自定义数据，调用 `(bump-visual-version!)` 通知 Rust 宿主推送最新快照。
+
+---
+
+## 7. 核心原语 vs 网格原语清单（基座改造指南第 6 项）
+
+基座是通用逻辑模拟器：新模型选型时先只用**核心原语**，需要网格世界时才引入网格原语。非网格模型（如 `tests/fixtures/models/counter_economy/`）只依赖核心原语与生命周期钩子即可完整运行 epoch。
+
+### 7.1 核心原语（通用，与领域无关）
+
+| 类别 | 原语 / 接口 |
+|---|---|
+| 生命周期钩子 | `engine:on-init`、`engine:on-tick`、`engine:on-input`、`engine:on-command`、`engine:on-ui-action`、`engine:export-state`、`engine:import-state`、玩家连接钩子 |
+| 随机（确定性） | `engine:random-int`、`engine:raw-random-int`、`(random:seed!)`、`(random:reset!)`（宿主 xoshiro256++，状态进快照，无系统熵） |
+| 快照与评测（宿主） | 快照 v2 导出/导入、MCP 工具 `state_hash`、`run_epoch`、`create_checkpoint`、`rollback_checkpoint`（均为宿主实现，非脚本逻辑） |
+| 日志与消息 | `engine:log`、`engine:send-message`、`engine:broadcast` |
+| MCP 黑板 | `engine:raw-mcp-store-*` 与 `mcp-store:*` 包装（Agent 记忆，非世界状态） |
+| 动态工具（dev 模式） | `(mcp:def-tool ...)`、`engine:mcp-tools`、`engine:on-mcp-call`（eval 模式下冻结，见基座双模式说明） |
+| 断言（dev 模式） | Scheme 侧 `assert_state`/`eval_assertion`（同 VM 求值，仅调试用；eval 模式的评测断言由宿主侧按 `{path, op, expected}` 对导出状态求值） |
+| ECS 容器原语（结构通用） | `ecs:spawn`/`ecs:spawn-named`、`ecs:despawn`、`ecs:exists?`、`ecs:set`/`ecs:get`（DynamicProps）、`ecs:add-tag`/`ecs:remove-tag`/`ecs:has-tag?`、`ecs:relate`/`ecs:unrelate`/`ecs:target`/`ecs:children`、`ecs:query`、`ecs:inspect`、`ecs:export-world`/`ecs:import-world`、`ecs:clear!` |
+
+### 7.2 网格原语（Roguelike 领域专用，非网格模型不要用）
+
+| 类别 | 原语 / 接口 |
+|---|---|
+| 空间与渲染 | `ecs:set-pos`/`ecs:get-pos`、`ecs:set-glyph`/`ecs:get-glyph`、`ecs:at`、`ecs:render-viewport`、`GridPos`/`VisualGlyph` 四层网格、`SpatialGrid`、`ViewportRasterizer`、`engine:viewport-size`、`engine:render-snapshot` |
+| 网格算子 | `ecs:fov`（阴影投射）、`ecs:find-path`（A*）、`ecs:dijkstra-map`、`ecs:noise-2d`、`ecs:generate-cave` |
+| 玩家会话呈现 | `ecs:set-player-session`（视口绑定部分） |
+
+注：本清单只做契约/装载层分类，不改变 `src/ecs/` 的组件注册；网格组件仍在基座内注册，非网格模型 simply 不使用它们。

@@ -29,7 +29,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 rand = "0.8"
 rustc-hash = "2.1"
-flecs_ecs = { git = "https://github.com/Indra-db/Flecs-Rust", branch = "main" }
+flecs_ecs = { git = "https://github.com/Indra-db/Flecs-Rust", rev = "bf956db99b69d41ee142c9d52054911af28d7e93" }
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

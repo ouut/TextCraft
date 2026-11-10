@@ -15,11 +15,11 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 fn get_scripts_dir() -> PathBuf {
-    let p = PathBuf::from("scripts");
+    let p = PathBuf::from("models/roguelike");
     if p.exists() {
         p
     } else {
-        PathBuf::from("../../scripts")
+        PathBuf::from("../../models/roguelike")
     }
 }
 
@@ -76,7 +76,7 @@ fn test_1_cli_argument_parsing_and_config() {
         ServerArgs::try_parse_from(["textcraft-server"]).expect("Default args parsing should succeed");
     assert_eq!(default_args.host, "0.0.0.0");
     assert_eq!(default_args.port, 8081);
-    assert_eq!(default_args.scripts_dir, PathBuf::from("scripts"));
+    assert_eq!(default_args.scripts_dir, PathBuf::from("models/roguelike"));
     assert!(!default_args.watch);
     assert_eq!(default_args.log_level, LogLevel::Info);
     assert_eq!(default_args.admin_token, "admin");
@@ -190,6 +190,7 @@ async fn test_2b_http_asset_serving_custom_web_directory() {
         heartbeat_timeout_secs: 30,
         snapshot_heartbeat_ms: 1000,
         mcp_port: None,
+        eval: false,
         web_dir: Some(temp_dir.clone()),
     };
 
@@ -230,6 +231,7 @@ async fn test_2c_http_asset_serving_local_web_auto_detection() {
         heartbeat_timeout_secs: 30,
         snapshot_heartbeat_ms: 1000,
         mcp_port: None,
+        eval: false,
         web_dir: None,
     };
 
@@ -856,12 +858,15 @@ async fn test_8_state_persistence_shutdown_and_restart() {
         server.logic.save_state_to_file().unwrap();
         assert!(save_file.exists(), "Save file should be written to disk");
 
-        // Verify JSON contents on disk
+        // Verify JSON contents on disk (snapshot v2 save format, item 2:
+        // the world state lives under "world_state" in the wrapper)
         let file_content = std::fs::read_to_string(&save_file).unwrap();
         let json_val: serde_json::Value = serde_json::from_str(&file_content).unwrap();
-        assert_eq!(json_val["players"]["42"]["gold"], 888);
-        assert_eq!(json_val["players"]["42"]["x"], 5);
-        assert_eq!(json_val["players"]["42"]["y"], 5);
+        assert_eq!(json_val["format"], "textcraft-snapshot");
+        assert_eq!(json_val["version"], 2);
+        assert_eq!(json_val["world_state"]["players"]["42"]["gold"], 888);
+        assert_eq!(json_val["world_state"]["players"]["42"]["x"], 5);
+        assert_eq!(json_val["world_state"]["players"]["42"]["y"], 5);
 
         // Server handle shuts down
         server.handle.shutdown();

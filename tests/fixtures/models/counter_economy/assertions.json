@@ -1,0 +1,1 @@
+[{"expected":10,"op":"eq","path":"tick_count"},{"expected":500,"op":"gte","path":"accounts.bob.balance"},{"op":"exists","path":"transfers"}]

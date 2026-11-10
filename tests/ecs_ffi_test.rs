@@ -3,11 +3,11 @@ use textcraft::ecs::components::{Color, PlayerSession, LAYER_CREATURE, LAYER_TER
 use textcraft::logic::SchemeLogic;
 
 fn get_scripts_dir() -> PathBuf {
-    let scripts_dir = PathBuf::from("scripts");
+    let scripts_dir = PathBuf::from("models/roguelike");
     if scripts_dir.exists() {
         scripts_dir
     } else {
-        PathBuf::from("../../scripts")
+        PathBuf::from("../../models/roguelike")
     }
 }
 

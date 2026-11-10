@@ -95,7 +95,7 @@ pub struct ServerArgs {
     pub port: u16,
 
     /// Directory containing Scheme scripts (prelude.scm, main.scm)
-    #[arg(long, default_value = "scripts")]
+    #[arg(long, default_value = "models/roguelike")]
     pub scripts_dir: PathBuf,
 
     /// Enable hot reloading file watcher for Scheme scripts (polls every 2s)
@@ -133,6 +133,14 @@ pub struct ServerArgs {
     /// Optional HTTP port for Model Context Protocol (MCP) JSON-RPC 2.0 server (e.g. 8082)
     #[arg(long)]
     pub mcp_port: Option<u16>,
+
+    /// Evaluation mode: freeze the MCP tool surface (guide 4.5). Write-class
+    /// tools (ecs_modify, '!' REPL, reload_scripts, runtime tool
+    /// registration, Scheme-side assertions) are rejected at the MCP
+    /// dispatch layer; read/step/hash/run_epoch stay available.
+    /// Default is dev mode with the full v5.0 tool surface.
+    #[arg(long, default_value_t = false)]
+    pub eval: bool,
 
     /// Custom directory for serving web client static assets (overrides embedded assets)
     #[arg(long)]
@@ -216,6 +224,13 @@ pub struct TextCraftServer {
     pub snapshot_heartbeat_ms: u64,
     pub log_level: LogLevel,
     pub is_paused: Arc<AtomicBool>,
+    /// Permanent eval mode (set from `--eval` or `set_eval_mode`).
+    pub eval_mode: bool,
+    /// True while `run_epoch` executes (epoch-internal eval gating).
+    in_epoch: bool,
+    /// Dynamic (Scheme-registered) tool names captured when eval gating
+    /// was activated; later registrations are rejected while gated.
+    eval_dynamic_allowlist: Option<std::collections::HashSet<String>>,
     pub mcp_storage: McpStorage,
     last_snapshots: HashMap<PlayerId, (u64, Instant, u64, PlayerSnapshot)>,
     player_tokens: HashMap<PlayerId, String>,
@@ -311,6 +326,9 @@ impl TextCraftServer {
         .await?;
         server.snapshot_heartbeat_ms = args.snapshot_heartbeat_ms;
         server.log_level = args.log_level;
+        if args.eval {
+            server.set_eval_mode(true);
+        }
         if let Some(mcp_port) = args.mcp_port {
             let mcp_addr: SocketAddr = format!("{}:{}", args.host, mcp_port).parse()?;
             server.start_mcp_server(mcp_addr).await?;
@@ -353,6 +371,9 @@ impl TextCraftServer {
             snapshot_heartbeat_ms: 1000,
             log_level: LogLevel::Info,
             is_paused: Arc::new(AtomicBool::new(false)),
+            eval_mode: false,
+            in_epoch: false,
+            eval_dynamic_allowlist: None,
             mcp_storage,
             last_snapshots: HashMap::new(),
             player_tokens: HashMap::new(),
@@ -406,6 +427,264 @@ impl TextCraftServer {
     // ==========================================
     // Dedicated MCP Storage & Blackboard Methods
     // ==========================================
+
+    /// Enable/disable permanent eval mode (guide item 5). Turning it on
+    /// captures the currently registered dynamic tool names as the frozen
+    /// allowlist; registrations after that point are rejected while gated.
+    pub fn set_eval_mode(&mut self, on: bool) {
+        self.eval_mode = on;
+        if on {
+            self.capture_eval_allowlist();
+        } else if !self.in_epoch {
+            self.eval_dynamic_allowlist = None;
+        }
+    }
+
+    fn capture_eval_allowlist(&mut self) {
+        let names: std::collections::HashSet<String> = self
+            .logic
+            .mcp_list_tools()
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.eval_dynamic_allowlist = Some(names);
+    }
+
+    /// Whether eval gating is currently active (permanent or in-epoch).
+    pub fn eval_gated(&self) -> bool {
+        self.eval_mode || self.in_epoch
+    }
+
+    /// The single MCP-dispatch gate for eval mode (guide 4.5). Returns
+    /// `Some(error_message)` when the call must be rejected. Dev mode
+    /// (gate inactive) never rejects anything here — the full v5.0
+    /// development surface (`!` REPL, ecs_modify, hot reload, runtime
+    /// tool registration, Scheme assertions) stays exactly as it was.
+    fn eval_block_reason(&self, name: &str, arguments: &serde_json::Value) -> Option<String> {
+        if !self.eval_gated() {
+            return None;
+        }
+        let blocked = |what: &str| Some(format!("{} is disabled in eval mode", what));
+        match name {
+            "ecs_modify" => return blocked("ecs_modify"),
+            "reload_scripts" => return blocked("reload_scripts"),
+            "create_checkpoint" | "rollback_checkpoint" => {
+                return blocked("checkpoints (only run_epoch may snapshot internally)")
+            }
+            "eval_assertion" | "assert_state" => {
+                return blocked("Scheme-side assertions (use run_epoch host assertions)")
+            }
+            "game_command" => {
+                let cmd = arguments.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                if cmd.trim_start().starts_with('!') {
+                    return blocked("the '!' REPL");
+                }
+            }
+            "ecs_inspect" => {
+                if arguments.get("modify").is_some_and(|m| m.is_object()) {
+                    return blocked("ecs_inspect with a modify patch (ecs_modify equivalent)");
+                }
+            }
+            _ => {}
+        }
+        // Dynamic tools: host tools are decided above / allowed below;
+        // Scheme-registered tools are frozen to the captured allowlist.
+        let host_names: std::collections::HashSet<String> = Self::host_mcp_tools_schema()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+            .collect();
+        if !host_names.contains(name) {
+            let allowed = self
+                .eval_dynamic_allowlist
+                .as_ref()
+                .is_some_and(|set| set.contains(name));
+            if !allowed {
+                return Some(format!(
+                    "dynamic tool '{}' is not in the frozen eval tool set (registered after eval started, or unknown)",
+                    name
+                ));
+            }
+        }
+        None
+    }
+
+    /// Run one epoch (guide 4.4): clean reset -> load model -> set seed ->
+    /// step with injected inputs -> host-side assertions -> epoch report.
+    /// The report contains no timestamps or durations, so the same epoch
+    /// configuration produces a byte-identical report.
+    /// Eval gating is active for the duration of the epoch.
+    pub fn run_epoch(&mut self, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let was_in_epoch = self.in_epoch;
+        if !was_in_epoch {
+            self.in_epoch = true;
+            if self.eval_dynamic_allowlist.is_none() {
+                self.capture_eval_allowlist();
+            }
+        }
+        let result = self.run_epoch_inner(args);
+        self.in_epoch = was_in_epoch;
+        if !self.in_epoch && !self.eval_mode {
+            self.eval_dynamic_allowlist = None;
+        }
+        result
+    }
+
+    fn run_epoch_inner(&mut self, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+        // Optional model switch: build a fresh logic for the given dir.
+        if let Some(dir) = args.get("scripts_dir").and_then(|v| v.as_str()) {
+            let dir_path = PathBuf::from(dir);
+            if dir_path != self.logic.scripts_dir() {
+                let mut logic = SchemeLogic::new(&dir_path, false, None)
+                    .map_err(|e| format!("run_epoch: failed to create logic for {}: {}", dir, e))?;
+                logic
+                    .init()
+                    .map_err(|e| format!("run_epoch: failed to init model {}: {}", dir, e))?;
+                self.mcp_storage = logic.mcp_storage();
+                self.logic = logic;
+            } else {
+                // Same model: reset to a clean state via on-init.
+                if self.logic.has_hook("engine:on-init") {
+                    self.logic.force_reload(true)?;
+                }
+            }
+        } else if self.logic.has_hook("engine:on-init") {
+            self.logic.force_reload(true)?;
+        }
+
+        let scripts_hash = crate::logic::snapshot::scripts_hash(self.logic.scripts_dir());
+        let seed = args
+            .get("seed")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.logic.model_manifest.default_seed);
+        let steps = args.get("steps").and_then(|v| v.as_u64()).unwrap_or(1);
+        let dt = args.get("dt").and_then(|v| v.as_f64()).unwrap_or(0.016) as f32;
+
+        // Resolve assertions: inline array, file path string, or the
+        // manifest-declared file (relative to the model dir).
+        let assertions: Vec<serde_json::Value> = match args.get("assertions") {
+            Some(serde_json::Value::Array(arr)) => arr.clone(),
+            Some(serde_json::Value::String(rel)) => {
+                let path = PathBuf::from(rel);
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    self.logic.scripts_dir().join(rel)
+                };
+                let content = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("run_epoch: cannot read assertions {}: {}", path.display(), e))?;
+                let parsed: serde_json::Value = serde_json::from_str(&content)
+                    .map_err(|e| format!("run_epoch: assertions file is not JSON: {}", e))?;
+                parsed
+                    .as_array()
+                    .cloned()
+                    .ok_or_else(|| "run_epoch: assertions file must contain a JSON array".to_string())?
+            }
+            _ => {
+                if let Some(rel) = &self.logic.model_manifest.assertions {
+                    let path = self.logic.scripts_dir().join(rel);
+                    if path.exists() {
+                        let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                        let parsed: serde_json::Value =
+                            serde_json::from_str(&content).map_err(|e| e.to_string())?;
+                        parsed.as_array().cloned().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+        let assertions_hash =
+            crate::logic::snapshot::hash_json(&serde_json::Value::Array(assertions.clone()));
+
+        // Join every player referenced by the inputs, then set the seed
+        // (order per guide: reset -> load -> seed -> step).
+        let empty: Vec<serde_json::Value> = Vec::new();
+        let inputs = args.get("inputs").and_then(|v| v.as_array()).unwrap_or(&empty);
+        let mut joined: Vec<u64> = Vec::new();
+        for item in inputs {
+            let pid = item.get("player_id").and_then(|v| v.as_u64()).unwrap_or(1);
+            if !joined.contains(&pid) {
+                joined.push(pid);
+                let _ = self.logic.on_player_join(pid, "epoch");
+            }
+        }
+        self.logic.set_random_seed(Some(seed));
+
+        for step_idx in 0..steps {
+            for item in inputs {
+                let at = item.get("step").and_then(|v| v.as_u64()).unwrap_or(0);
+                if at != step_idx {
+                    continue;
+                }
+                let pid = item.get("player_id").and_then(|v| v.as_u64()).unwrap_or(1);
+                let itype = item.get("type").and_then(|v| v.as_str()).unwrap_or("key");
+                match itype {
+                    "key" => {
+                        let action = match item.get("action").and_then(|v| v.as_str()) {
+                            Some("up") => crate::types::KeyAction::Up,
+                            _ => crate::types::KeyAction::Down,
+                        };
+                        self.logic.on_input(pid, &PlayerInput::Key {
+                            code: item.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            action,
+                            shift: false,
+                            ctrl: false,
+                            alt: false,
+                        })?;
+                    }
+                    "cmd" | "command" => {
+                        let cmd = item.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                        if cmd.trim_start().starts_with('!') {
+                            return Err("run_epoch: '!' REPL inputs are forbidden in an epoch".into());
+                        }
+                        self.logic.on_command(pid, cmd)?;
+                    }
+                    "ui" => {
+                        self.logic.on_ui_action(
+                            pid,
+                            item.get("action").and_then(|v| v.as_str()).unwrap_or(""),
+                            item.get("payload").cloned().as_ref().unwrap_or(&serde_json::Value::Null),
+                        )?;
+                    }
+                    "mouse" => {
+                        self.logic.on_input(pid, &PlayerInput::Mouse {
+                            x: item.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                            y: item.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                            button: item.get("button").and_then(|v| v.as_str()).unwrap_or("left").to_string(),
+                        })?;
+                    }
+                    other => return Err(format!("run_epoch: unsupported input type '{}'", other)),
+                }
+            }
+            let tick_id = self.handle.increment_server_tick();
+            self.logic.on_tick(dt, tick_id)?;
+        }
+
+        let final_state = self.logic.export_state()?;
+        let results = crate::logic::snapshot::eval_host_assertions(&final_state, &assertions);
+        let all_passed = results
+            .iter()
+            .all(|r| r.get("passed").and_then(|v| v.as_bool()) == Some(true));
+        let final_state_hash = self.logic.state_hash()?;
+
+        Ok(serde_json::json!({
+            "mode": "eval",
+            "scripts_hash": scripts_hash,
+            "assertions_hash": assertions_hash,
+            "seed": seed,
+            "steps": steps,
+            "final_state_hash": final_state_hash,
+            "all_passed": all_passed,
+            "results": results,
+        }))
+    }
 
     /// Step forward the simulation world deterministically by `count` ticks without real-time sleep.
     pub fn simulate_steps(&mut self, count: u64, dt: f32) -> Result<(), String> {
@@ -1455,6 +1734,46 @@ impl TextCraftServer {
                     "required": ["eid"]
                 }
             }),
+            serde_json::json!({
+                "name": "state_hash",
+                "description": "Return the SHA-256 state hash of the current snapshot v2 (canonical serialization).",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+            serde_json::json!({
+                "name": "run_epoch",
+                "description": "Run one deterministic epoch: clean reset, load model, set seed, step with injected inputs, evaluate host-side assertions, return the epoch report (scripts/assertions hashes + final state hash).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scripts_dir": { "type": "string", "description": "Optional model directory to load" },
+                        "seed": { "type": "integer" },
+                        "steps": { "type": "integer" },
+                        "dt": { "type": "number" },
+                        "inputs": { "type": "array", "description": "Items: {step, player_id, type: key|cmd|ui|mouse, code, command, action, payload, x, y, button}" },
+                        "assertions": { "description": "Inline assertion array or path to assertions JSON file: [{path, op, expected}]" }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "create_checkpoint",
+                "description": "HOST snapshot v2 checkpoint: capture full causal state (world_state + ECS world + PRNG + tick) under a tag in the checkpoint namespace.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tag": { "type": "string", "description": "Checkpoint tag (default 'latest')" }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "rollback_checkpoint",
+                "description": "HOST snapshot v2 rollback: restore a checkpoint created by create_checkpoint. Legacy non-v2 stored values are rejected with a version error.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "tag": { "type": "string", "description": "Checkpoint tag (default 'latest')" }
+                    }
+                }
+            }),
         ]
     }
 
@@ -1553,6 +1872,10 @@ impl TextCraftServer {
     }
 
     fn execute_mcp_tool(&mut self, name: &str, arguments: &serde_json::Value) -> (String, bool) {
+        // Eval-mode gate: ONE check at the dispatch layer (guide 4.5).
+        if let Some(reason) = self.eval_block_reason(name, arguments) {
+            return (reason, true);
+        }
         match name {
             "game_command" => {
                 let pid = arguments
@@ -2243,6 +2566,54 @@ impl TextCraftServer {
                         false,
                     ),
                     Err(err) => (err, true),
+                }
+            }
+            "state_hash" => {
+                match self.logic.state_hash() {
+                    Ok(h) => {
+                        let out = serde_json::json!({ "state_hash": h });
+                        (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
+                    }
+                    Err(e) => (e, true),
+                }
+            }
+            "run_epoch" => {
+                match self.run_epoch(arguments) {
+                    Ok(report) => (
+                        serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string()),
+                        false,
+                    ),
+                    Err(e) => (e, true),
+                }
+            }
+            "create_checkpoint" => {
+                let tag = arguments.get("tag").and_then(|v| v.as_str()).unwrap_or("latest");
+                match self.logic.create_checkpoint(tag) {
+                    Ok(saved_tag) => {
+                        let out = serde_json::json!({
+                            "success": true,
+                            "tag": saved_tag,
+                            "namespace": "checkpoint",
+                            "message": format!("Checkpoint '{}' saved (snapshot v2, host)", saved_tag)
+                        });
+                        (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
+                    }
+                    Err(e) => (e, true),
+                }
+            }
+            "rollback_checkpoint" => {
+                let tag = arguments.get("tag").and_then(|v| v.as_str()).unwrap_or("latest");
+                match self.logic.rollback_checkpoint(tag) {
+                    Ok(true) => {
+                        let out = serde_json::json!({
+                            "success": true,
+                            "tag": tag,
+                            "message": format!("Successfully rolled back to checkpoint '{}'", tag)
+                        });
+                        (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
+                    }
+                    Ok(false) => (format!("Checkpoint '{}' not found in mcp-store", tag), true),
+                    Err(e) => (e, true),
                 }
             }
             "ecs_modify" => {

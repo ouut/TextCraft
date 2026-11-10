@@ -545,6 +545,265 @@ impl EcsWorld {
             .ok_or_else(|| format!("Entity {} disappeared after modification", eid))
     }
 
+    // ------------------------------------------------------------------
+    // Snapshot v2: full-world export / import (guide item 2)
+    // ------------------------------------------------------------------
+
+    /// Tag/component names that appear in `inspect_entity`'s `tags` list but
+    /// are structural (the four core components and Flecs internals), not
+    /// user tags. They must not be re-applied as tags on import.
+    fn is_structural_tag(name: &str) -> bool {
+        matches!(
+            name,
+            "GridPos"
+                | "VisualGlyph"
+                | "DynamicProps"
+                | "PlayerSession"
+                | "Component"
+                | "Identifier"
+                | "Name"
+                | "Symbol"
+                | "EcsComponent"
+                | "EcsIdentifier"
+                | "flecs"
+                | "ChildOf"
+                | "IsA"
+                | "DependsOn"
+        ) || name.contains('.')
+            || name.starts_with("flecs")
+            || name.starts_with("Ecs")
+    }
+
+    /// Export every *game* entity as JSON, reusing `inspect_entity`'s shape.
+    ///
+    /// An entity counts as a game entity iff it carries at least one of the
+    /// four core components (GridPos / VisualGlyph / DynamicProps /
+    /// PlayerSession). This excludes Flecs builtin, component, tag and
+    /// relation *definition* entities, which are recreated by `EcsWorld::new`
+    /// and by `add_tag`/`relate` on demand. Entities are sorted by id so the
+    /// export is deterministic for a given world.
+    pub fn export_world_json(&self) -> serde_json::Value {
+        let mut ids: Vec<u64> = Vec::new();
+        self.world.each_alive_entity(|e| {
+            ids.push(*e.id());
+        });
+        ids.sort_unstable();
+        let mut entities = Vec::new();
+        for id in ids {
+            let ent = self.world.entity_from_id(id);
+            let has_core = ent.cloned::<Option<&GridPos>>().is_some()
+                || ent.cloned::<Option<&VisualGlyph>>().is_some()
+                || ent.cloned::<Option<&DynamicProps>>().is_some()
+                || ent.cloned::<Option<&PlayerSession>>().is_some();
+            if !has_core {
+                continue;
+            }
+            if let Some(mut v) = self.inspect_entity(id) {
+                // Drop structural names from tags so export is import-ready.
+                if let Some(tags) = v.get_mut("tags").and_then(|t| t.as_array_mut()) {
+                    tags.retain(|t| {
+                        t.as_str().is_some_and(|s| !Self::is_structural_tag(s))
+                    });
+                }
+                entities.push(v);
+            }
+        }
+        serde_json::json!({ "entities": entities })
+    }
+
+    /// Import a world previously produced by `export_world_json`.
+    ///
+    /// Semantics (guide 4.2): the current world is cleared; entities are
+    /// recreated trying to preserve their original ids via Flecs
+    /// `make_alive`. If an id cannot be preserved it is remapped and the
+    /// returned `id_map` (old -> new) records every entity's mapping.
+    /// SpatialGrid is rebuilt as a side effect of `set_pos`/`set_glyph`.
+    /// All parsing/validation happens before the world is touched, so a
+    /// malformed snapshot leaves the current world intact.
+    pub fn import_world_json(
+        &mut self,
+        data: &serde_json::Value,
+    ) -> Result<std::collections::HashMap<u64, u64>, String> {
+        let arr = data
+            .get("entities")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "ecs_world.entities must be an array".to_string())?;
+
+        // ---- Validate & parse into plain structs first -----------------
+        struct ParsedEnt {
+            old_id: u64,
+            name: Option<String>,
+            pos: Option<GridPos>,
+            glyph: Option<VisualGlyph>,
+            props: Option<std::collections::HashMap<String, serde_json::Value>>,
+            session: Option<PlayerSession>,
+            tags: Vec<String>,
+            relations: Vec<(String, u64)>,
+        }
+        let mut parsed: Vec<ParsedEnt> = Vec::with_capacity(arr.len());
+        for item in arr {
+            let old_id = item
+                .get("id")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| "entity entry missing numeric 'id'".to_string())?;
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            // Note: values that round-tripped through the Scheme VM may
+            // turn JSON null into `false`; treat any non-object as absent.
+            let pos = match item.get("position") {
+                Some(p) if p.is_object() => Some(GridPos::new(
+                    p.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                    p.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                    p.get("layer").and_then(|v| v.as_u64()).unwrap_or(0) as u8,
+                )),
+                _ => None,
+            };
+            let glyph = match item.get("glyph") {
+                Some(g) if g.is_object() => {
+                    let ch = g
+                        .get("char")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.chars().next())
+                        .unwrap_or(' ');
+                    let parse_col = |v: &serde_json::Value| -> Option<Color> {
+                        v.as_array().and_then(|a| {
+                            if a.len() >= 3 {
+                                Some(Color::rgb(
+                                    a[0].as_u64().unwrap_or(0) as u8,
+                                    a[1].as_u64().unwrap_or(0) as u8,
+                                    a[2].as_u64().unwrap_or(0) as u8,
+                                ))
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                    Some(VisualGlyph::new(
+                        ch,
+                        g.get("fg").and_then(parse_col),
+                        g.get("bg").and_then(parse_col),
+                        g.get("solid").and_then(|v| v.as_bool()).unwrap_or(false),
+                        g.get("opaque").and_then(|v| v.as_bool()).unwrap_or(false),
+                    ))
+                }
+                _ => None,
+            };
+            let props = match item.get("dynamic_props") {
+                Some(serde_json::Value::Object(map)) => {
+                    Some(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                }
+                _ => None,
+            };
+            let session = match item.get("player_session") {
+                Some(s) if s.is_object() => Some(PlayerSession::new(
+                    s.get("player_id").and_then(|v| v.as_u64()).unwrap_or(0),
+                    s.get("viewport_cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16,
+                    s.get("viewport_rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16,
+                )),
+                _ => None,
+            };
+            let tags = item
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                        .filter(|s| !Self::is_structural_tag(s))
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default();
+            let relations = item
+                .get("relationships")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|r| {
+                            let rel = r.get("relation")?.as_str()?.to_string();
+                            let tgt = r.get("target_id")?.as_u64()?;
+                            Some((rel, tgt))
+                        })
+                        .collect::<Vec<(String, u64)>>()
+                })
+                .unwrap_or_default();
+            parsed.push(ParsedEnt {
+                old_id,
+                name,
+                pos,
+                glyph,
+                props,
+                session,
+                tags,
+                relations,
+            });
+        }
+
+        // ---- Switch worlds ----------------------------------------------
+        self.clear();
+
+        // Pass 1: reserve ids (make_alive) before any dynamic tag/relation
+        // entity is created, so new definition entities cannot collide.
+        let mut id_map: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        for p in &parsed {
+            let view = self.world.make_alive(p.old_id);
+            let new_id = *view.id();
+            if new_id == p.old_id && self.exists(p.old_id) {
+                id_map.insert(p.old_id, p.old_id);
+            } else {
+                let spawned = self.spawn();
+                id_map.insert(p.old_id, spawned);
+            }
+        }
+
+        // Pass 2: components, names, tags.
+        for p in &parsed {
+            let new_id = id_map[&p.old_id];
+            if let Some(name) = &p.name {
+                if !name.is_empty() {
+                    self.world.entity_from_id(new_id).set_name(name);
+                }
+            }
+            if let Some(pos) = p.pos {
+                self.set_pos(new_id, pos.x, pos.y, pos.layer);
+            }
+            if let Some(g) = p.glyph {
+                self.set_glyph(new_id, g.ch, g.fg, g.bg, g.solid, g.opaque);
+            }
+            if let Some(props) = &p.props {
+                if props.is_empty() {
+                    self.world
+                        .entity_from_id(new_id)
+                        .set(DynamicProps::default());
+                } else {
+                    for (k, v) in props {
+                        self.set_prop(new_id, k, v.clone());
+                    }
+                }
+            }
+            if let Some(sess) = &p.session {
+                self.world.entity_from_id(new_id).set(sess.clone());
+            }
+            for tag in &p.tags {
+                self.add_tag(new_id, tag);
+            }
+        }
+
+        // Pass 3: relationships (targets remapped through id_map).
+        for p in &parsed {
+            let new_id = id_map[&p.old_id];
+            for (rel, tgt) in &p.relations {
+                if let Some(&new_tgt) = id_map.get(tgt) {
+                    self.relate(new_id, rel, new_tgt);
+                }
+                // Targets outside the snapshot (definition entities) are
+                // not causal game state; see state_inventory.md.
+            }
+        }
+
+        Ok(id_map)
+    }
+
     /// Check whether coordinate `(x, y)` has any opaque entity.
     #[inline]
     pub fn is_opaque(&self, x: i32, y: i32) -> bool {
@@ -806,5 +1065,37 @@ mod tests {
         ecs.clear();
         assert_eq!(ecs.count(), 0);
         assert!(ecs.inspect_entity(goblin).is_none());
+    }
+
+    #[test]
+    fn test_world_export_import_roundtrip_preserves_ids_and_relations() {
+        let mut ecs = EcsWorld::new();
+        let body = ecs.spawn_named("Body");
+        ecs.set_pos(body, 3, 4, LAYER_CREATURE);
+        ecs.set_glyph(body, '@', None, None, true, false);
+        ecs.set_prop(body, "hp", serde_json::json!(80));
+        let limb = ecs.spawn_named("Arm");
+        ecs.set_prop(limb, "severed", serde_json::json!(false));
+        ecs.set_prop(limb, "limb_type", serde_json::json!("arm_left"));
+        ecs.relate(limb, "PartOf", body);
+        ecs.add_tag(limb, "Limb");
+
+        let exported = ecs.export_world_json();
+        let ents = exported["entities"].as_array().unwrap();
+        assert_eq!(ents.len(), 2, "only game entities exported: {}", exported);
+
+        let mut restored = EcsWorld::new();
+        let filler = restored.spawn(); // occupy an unrelated id slot first
+        let _ = filler;
+        let id_map = restored.import_world_json(&exported).unwrap();
+        assert_eq!(id_map.get(&body), Some(&body), "body id preserved: {:?}", id_map);
+        assert_eq!(id_map.get(&limb), Some(&limb), "limb id preserved: {:?}", id_map);
+
+        let re = restored.export_world_json();
+        assert_eq!(re, exported, "re-export must equal original export");
+        assert_eq!(restored.target(limb, "PartOf"), Some(body));
+        assert!(restored.has_tag(limb, "Limb"));
+        assert_eq!(restored.get_prop(limb, "severed"), Some(serde_json::json!(false)));
+        assert_eq!(restored.at(3, 4, None), vec![body], "spatial rebuilt");
     }
 }

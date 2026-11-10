@@ -27,11 +27,11 @@ mod tests {
 
     #[test]
     fn test_scheme_logic_lifecycle() {
-        let scripts_dir = PathBuf::from("scripts");
+        let scripts_dir = PathBuf::from("models/roguelike");
         let dir = if scripts_dir.exists() {
             scripts_dir
         } else {
-            PathBuf::from("../../scripts")
+            PathBuf::from("../../models/roguelike")
         };
 
         let mut logic = SchemeLogic::new(&dir, false, None).expect("Failed to initialize SchemeLogic");
@@ -89,11 +89,11 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("textcraft_test_save_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let save_file = temp_dir.join("save.json");
 
-        let scripts_dir = PathBuf::from("scripts");
+        let scripts_dir = PathBuf::from("models/roguelike");
         let dir = if scripts_dir.exists() {
             scripts_dir
         } else {
-            PathBuf::from("../../scripts")
+            PathBuf::from("../../models/roguelike")
         };
 
         {
@@ -119,11 +119,11 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!("textcraft_test_reload_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        let scripts_dir = PathBuf::from("scripts");
+        let scripts_dir = PathBuf::from("models/roguelike");
         let dir = if scripts_dir.exists() {
             scripts_dir
         } else {
-            PathBuf::from("../../scripts")
+            PathBuf::from("../../models/roguelike")
         };
         for entry in std::fs::read_dir(&dir).unwrap() {
             let entry = entry.unwrap();

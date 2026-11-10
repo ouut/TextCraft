@@ -7,11 +7,11 @@ use serde_json::json;
 use textcraft::{SchemeLogic, TextCraftServer, EMBEDDED_WEB_ASSETS};
 
 fn get_scripts_dir() -> PathBuf {
-    let p = PathBuf::from("scripts");
+    let p = PathBuf::from("models/roguelike");
     if p.exists() {
         p
     } else {
-        PathBuf::from("../../scripts")
+        PathBuf::from("../../models/roguelike")
     }
 }
 
