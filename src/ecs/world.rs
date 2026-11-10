@@ -574,28 +574,193 @@ impl EcsWorld {
             || name.starts_with("Ecs")
     }
 
+    /// Component names whose *values* `inspect_entity` serializes.
+    const KNOWN_VALUE_COMPONENTS: [&str; 4] =
+        ["GridPos", "VisualGlyph", "DynamicProps", "PlayerSession"];
+    /// Registered marker tags: their *presence* is serialized in `tags`.
+    const KNOWN_TAGS: [&str; 7] =
+        ["Monster", "Player", "Item", "Terrain", "Dead", "Liquid", "Burning"];
+    /// Registered relations: name + target are serialized in `relationships`.
+    const KNOWN_RELATIONS: [&str; 3] = ["EquippedOn", "PartOf", "CoveredWith"];
+
+    /// True when an entity view lives in the Flecs (or flecs-rust external
+    /// component) namespace tree, e.g. `::flecs::core::Component` or
+    /// `::external_components::vector::String`. Such entities are Flecs
+    /// infrastructure, never game state. Unnamed entities return no path
+    /// and are handled by the meaningful-content test instead: every
+    /// component/relation they carry belongs to a flecs-owned type, so
+    /// they never qualify (see `entity_has_game_content`).
+    fn is_infra_path(path: Option<&str>) -> bool {
+        match path {
+            Some(p) => {
+                p == "::flecs"
+                    || p.starts_with("::flecs::")
+                    || p == "::external_components"
+                    || p.starts_with("::external_components::")
+            }
+            None => false,
+        }
+    }
+
+    /// True when the entity is a component / tag / relation *definition*:
+    /// it carries the `flecs::Component` marker (everything registered via
+    /// `world.component::<T>()` does, including the core types registered
+    /// in `EcsWorld::new`), or some other entity uses its id as a
+    /// component/tag id or as the first (relation) id of a pair — which is
+    /// how the plain named entities created on demand by
+    /// `add_tag`/`relate` for dynamic tags/relations show up.
+    fn is_definition_entity(
+        ent: EntityView<'_>,
+        type_ids: &std::collections::HashSet<u64>,
+    ) -> bool {
+        ent.has(flecs_ecs::prelude::flecs::Component::id())
+            || type_ids.contains(&*ent.id())
+    }
+
+    /// True when an entity carries any *game* content: a name, or at least
+    /// one component / tag / pair whose type is not Flecs-owned and not
+    /// structural. Structural pairs such as `(Identifier, Name)` and
+    /// `(ChildOf, flecs-parent)` do not count on their own — the name they
+    /// encode is already covered by the name test.
+    fn entity_has_game_content(ent: EntityView<'_>) -> bool {
+        // Flecs wildcard entities ("*" / "_") sit under `::flecs::core`
+        // but report a bare path, so a bare name is not enough: an entity
+        // parented (ChildOf) under a flecs-namespace entity is infra,
+        // however it is named.
+        let mut child_of_infra = false;
+        ent.each_component(|cid| {
+            if cid.is_pair() {
+                let rel_name = cid.get_first_id().map(|e| e.name()).unwrap_or_default();
+                if rel_name == "ChildOf" {
+                    if let Some(parent) = cid.get_second_id() {
+                        if Self::is_infra_path(parent.path().as_deref()) {
+                            child_of_infra = true;
+                        }
+                    }
+                }
+            }
+        });
+        if !child_of_infra
+            && ent
+                .get_name()
+                .is_some_and(|n| !n.is_empty() && n != "*" && n != "_")
+        {
+            return true;
+        }
+        let mut qualifies = false;
+        ent.each_component(|cid| {
+            if qualifies {
+                return;
+            }
+            // Note: `is_structural_tag` must NOT be used here — it lists
+            // the four core components, which are game content. Flecs
+            // structural types (Identifier, ChildOf, DependsOn, ...) are
+            // all flecs-owned, so the path test already excludes them.
+            if cid.is_pair() {
+                if let Some(rel) = cid.get_first_id() {
+                    let rname = rel.name();
+                    let rpath = rel.path();
+                    if !rname.is_empty() && !Self::is_infra_path(rpath.as_deref()) {
+                        qualifies = true;
+                    }
+                }
+            } else if let Some(view) = cid.get_entity_view() {
+                let cname = view.name();
+                let cpath = view.path();
+                if !cname.is_empty() && !Self::is_infra_path(cpath.as_deref()) {
+                    qualifies = true;
+                }
+            }
+        });
+        qualifies
+    }
+
+    /// Names of registered components/relations on `ent` whose values the
+    /// export does not serialize: anything carrying the
+    /// `flecs::Component` definition marker that is not one of the four
+    /// value components, the known marker tags, or the known relations.
+    /// Plain named entities used as dynamic tags/relations (created by
+    /// `add_tag`/`relate`) have no such marker and are *not* unknown —
+    /// their presence round-trips through `tags` / `relationships`.
+    fn unknown_components_of(ent: EntityView<'_>) -> Vec<String> {
+        let mut unknown: Vec<String> = Vec::new();
+        ent.each_component(|cid| {
+            if cid.is_pair() {
+                if let Some(rel) = cid.get_first_id() {
+                    let rname = rel.name();
+                    let rpath = rel.path();
+                    if !rname.is_empty()
+                        && !Self::KNOWN_RELATIONS.contains(&rname.as_str())
+                        && !Self::is_structural_tag(&rname)
+                        && !Self::is_infra_path(rpath.as_deref())
+                        && rel.has(flecs_ecs::prelude::flecs::Component::id())
+                        && !unknown.contains(&rname)
+                    {
+                        unknown.push(rname);
+                    }
+                }
+            } else if let Some(view) = cid.get_entity_view() {
+                let cname = view.name();
+                let cpath = view.path();
+                if !cname.is_empty()
+                    && !Self::KNOWN_VALUE_COMPONENTS.contains(&cname.as_str())
+                    && !Self::KNOWN_TAGS.contains(&cname.as_str())
+                    && !Self::is_structural_tag(&cname)
+                    && !Self::is_infra_path(cpath.as_deref())
+                    && view.has(flecs_ecs::prelude::flecs::Component::id())
+                    && !unknown.contains(&cname)
+                {
+                    unknown.push(cname);
+                }
+            }
+        });
+        unknown.sort();
+        unknown
+    }
+
     /// Export every *game* entity as JSON, reusing `inspect_entity`'s shape.
     ///
-    /// An entity counts as a game entity iff it carries at least one of the
-    /// four core components (GridPos / VisualGlyph / DynamicProps /
-    /// PlayerSession). This excludes Flecs builtin, component, tag and
-    /// relation *definition* entities, which are recreated by `EcsWorld::new`
-    /// and by `add_tag`/`relate` on demand. Entities are sorted by id so the
-    /// export is deterministic for a given world.
+    /// An entity counts as a game entity iff it carries any game content —
+    /// a component, a tag, a relationship, or a name (see
+    /// `entity_has_game_content`) — and is not Flecs infrastructure:
+    /// component/tag/relation *definition* entities (see
+    /// `is_definition_entity`) and anything under the `flecs` /
+    /// `external_components` namespaces are excluded. Definitions are
+    /// recreated by `EcsWorld::new` and by `add_tag`/`relate` on demand.
+    /// Entities whose registered components the export cannot serialize
+    /// get an `unknown_components` field listing their names instead of
+    /// being silently dropped or aborting the export. Entities are sorted
+    /// by id so the export is deterministic for a given world.
     pub fn export_world_json(&self) -> serde_json::Value {
         let mut ids: Vec<u64> = Vec::new();
         self.world.each_alive_entity(|e| {
             ids.push(*e.id());
         });
         ids.sort_unstable();
+
+        // Every id used as a type somewhere in the world: a component/tag
+        // id, or the first (relation) id of a pair. Entities in this set
+        // are definitions, however they were created.
+        let mut type_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for &id in &ids {
+            self.world.entity_from_id(id).each_component(|cid| {
+                if cid.is_pair() {
+                    if let Some(first) = cid.get_first_id() {
+                        type_ids.insert(*first.id());
+                    }
+                } else if let Some(view) = cid.get_entity_view() {
+                    type_ids.insert(*view.id());
+                }
+            });
+        }
+
         let mut entities = Vec::new();
         for id in ids {
             let ent = self.world.entity_from_id(id);
-            let has_core = ent.cloned::<Option<&GridPos>>().is_some()
-                || ent.cloned::<Option<&VisualGlyph>>().is_some()
-                || ent.cloned::<Option<&DynamicProps>>().is_some()
-                || ent.cloned::<Option<&PlayerSession>>().is_some();
-            if !has_core {
+            if Self::is_infra_path(ent.path().as_deref())
+                || Self::is_definition_entity(ent, &type_ids)
+                || !Self::entity_has_game_content(ent)
+            {
                 continue;
             }
             if let Some(mut v) = self.inspect_entity(id) {
@@ -604,6 +769,10 @@ impl EcsWorld {
                     tags.retain(|t| {
                         t.as_str().is_some_and(|s| !Self::is_structural_tag(s))
                     });
+                }
+                let unknown = Self::unknown_components_of(ent);
+                if !unknown.is_empty() {
+                    v["unknown_components"] = serde_json::json!(unknown);
                 }
                 entities.push(v);
             }
@@ -1065,6 +1234,54 @@ mod tests {
         ecs.clear();
         assert_eq!(ecs.count(), 0);
         assert!(ecs.inspect_entity(goblin).is_none());
+    }
+
+    #[test]
+    fn test_world_export_lists_unknown_components() {
+        // A registered component type the export logic does not know how
+        // to serialize (only GridPos / VisualGlyph / DynamicProps /
+        // PlayerSession values are exported).
+        #[derive(Debug, Clone, Copy, Default, Component)]
+        #[allow(dead_code)] // value is never read back: that is the point
+        struct SecretStats {
+            mana: i32,
+        }
+
+        let mut ecs = EcsWorld::new();
+        ecs.world.component::<SecretStats>();
+
+        let bearer = ecs.spawn_named("Bearer");
+        ecs.world
+            .entity_from_id(bearer)
+            .set(SecretStats { mana: 9 });
+
+        let plain = ecs.spawn_named("Plain");
+        ecs.set_prop(plain, "hp", serde_json::json!(10));
+        ecs.add_tag(plain, "Monster");
+        // Dynamic tag: round-trips through `tags`, must NOT be unknown.
+        ecs.add_tag(plain, "QuestTagged");
+
+        let exported = ecs.export_world_json();
+        let ents = exported["entities"].as_array().unwrap();
+        let bearer_v = ents.iter().find(|e| e["id"] == bearer).expect("bearer exported");
+        assert_eq!(
+            bearer_v["unknown_components"],
+            serde_json::json!(["SecretStats"]),
+            "unknown component listed, not silently dropped: {}",
+            bearer_v
+        );
+        let plain_v = ents.iter().find(|e| e["id"] == plain).expect("plain exported");
+        assert!(
+            plain_v.get("unknown_components").is_none(),
+            "known components/tags must not be flagged unknown: {}",
+            plain_v
+        );
+        // The SecretStats definition entity itself must not be exported.
+        assert!(
+            ents.iter().all(|e| e["name"] != "SecretStats"),
+            "component definition entity not exported: {}",
+            exported
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! models/roguelike serves only as the loading fixture (it provides the
 //! prelude with the `ecs:*` DSL).
 use std::path::PathBuf;
+use textcraft::ecs::EcsWorld;
 use textcraft::SchemeLogic;
 
 fn get_scripts_dir() -> PathBuf {
@@ -135,6 +136,100 @@ fn test_snapshot_v2_generic_rollback() {
         "player coordinate restored"
     );
     assert_eq!(restored, snap, "re-export after restore equals snapshot");
+}
+
+fn exported_ids(exported: &serde_json::Value) -> Vec<u64> {
+    exported["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_u64().unwrap())
+        .collect()
+}
+
+#[test]
+fn test_export_tag_only_entity_roundtrip() {
+    let mut ecs = EcsWorld::new();
+    let tagged = ecs.spawn();
+    assert!(ecs.add_tag(tagged, "Monster"));
+
+    let exported = ecs.export_world_json();
+    assert_eq!(
+        exported_ids(&exported),
+        vec![tagged],
+        "tag-only entity exported: {}",
+        exported
+    );
+
+    ecs.clear();
+    assert!(!ecs.exists(tagged), "entity gone after clear");
+
+    let id_map = ecs.import_world_json(&exported).unwrap();
+    assert_eq!(id_map.get(&tagged), Some(&tagged));
+    assert!(ecs.exists(tagged), "tag-only entity restored");
+    assert!(ecs.has_tag(tagged, "Monster"), "tag restored");
+    assert_eq!(ecs.export_world_json(), exported, "re-export identical");
+}
+
+#[test]
+fn test_export_relation_only_entity_roundtrip() {
+    let mut ecs = EcsWorld::new();
+    let hub = ecs.spawn_named("Hub");
+    let part = ecs.spawn();
+    assert!(ecs.relate(part, "PartOf", hub));
+
+    let exported = ecs.export_world_json();
+    let mut ids = exported_ids(&exported);
+    ids.sort_unstable();
+    let mut want = vec![hub, part];
+    want.sort_unstable();
+    assert_eq!(ids, want, "relation-only entity exported: {}", exported);
+
+    ecs.clear();
+    assert!(!ecs.exists(part));
+
+    let id_map = ecs.import_world_json(&exported).unwrap();
+    assert_eq!(id_map.get(&part), Some(&part));
+    assert_eq!(id_map.get(&hub), Some(&hub));
+    assert!(ecs.exists(part), "relation-only entity restored");
+    assert_eq!(
+        ecs.target(part, "PartOf"),
+        Some(hub),
+        "PartOf relation intact after roundtrip"
+    );
+    assert_eq!(ecs.export_world_json(), exported, "re-export identical");
+}
+
+#[test]
+fn test_export_count_matches_game_entities_no_infra_leak() {
+    let mut ecs = EcsWorld::new();
+    // Five hand-spawned game entities, each carrying exactly one kind of
+    // game content: a name, a registered tag, a relation, a position, a
+    // dynamic (on-demand) tag.
+    let named = ecs.spawn_named("Alpha");
+    let tag_only = ecs.spawn();
+    ecs.add_tag(tag_only, "Monster");
+    let rel_only = ecs.spawn();
+    ecs.relate(rel_only, "PartOf", named);
+    let pos_only = ecs.spawn();
+    ecs.set_pos(pos_only, 7, 8, 2);
+    let dyn_tag_only = ecs.spawn();
+    ecs.add_tag(dyn_tag_only, "QuestMarker");
+    // A completely empty entity carries nothing and is not a game entity.
+    let empty = ecs.spawn();
+
+    let exported = ecs.export_world_json();
+    let mut ids = exported_ids(&exported);
+    ids.sort_unstable();
+    let mut want = vec![named, tag_only, rel_only, pos_only, dyn_tag_only];
+    want.sort_unstable();
+    assert_eq!(
+        ids, want,
+        "exported set is exactly the hand-spawned game entities \
+         (no flecs infrastructure / definition entities, empty excluded): {}",
+        exported
+    );
+    assert!(!ids.contains(&empty));
 }
 
 #[test]

@@ -33,7 +33,7 @@
 
 **实体 id 保持（第 2 项落地）**：`flecs_ecs` 绑定提供 `World::make_alive`，快照导入先用它逐个预留原 id、再建动态标签/关系实体，实测 id 可原样保持（往返测试见 `src/ecs/world.rs` 单元测试与 `tests/snapshot_v2_test.rs`），故不采用 id_map 重写方案；`import_world_json` 仍返回 id_map 供校验，出现非恒等映射时宿主打警告日志。
 
-**实体引用字段登记**：经核查，`*world-state*` 内**不保存** Flecs 实体 id——玩家/怪物以字符串 id（`"goblin_1"`）＋坐标与 ECS 关联，anatomy 的肢体 id 只在单次调用的返回值里传递、不落盘。因此 id 重映射时 *world-state* 无字段需要重写。`DynamicProps` 的值由模型自定，若某模型把 eid 存进 props，须先在本表登记该键名，基座再据此重写——当前模型无此用法。另注意快照导出的“游戏实体”判据：至少携带 GridPos／VisualGlyph／DynamicProps／PlayerSession 之一；纯标签/纯关系实体不在快照内（当前玩法无此形态）。
+**实体引用字段登记**：经核查，`*world-state*` 内**不保存** Flecs 实体 id——玩家/怪物以字符串 id（`"goblin_1"`）＋坐标与 ECS 关联，anatomy 的肢体 id 只在单次调用的返回值里传递、不落盘。因此 id 重映射时 *world-state* 无字段需要重写。`DynamicProps` 的值由模型自定，若某模型把 eid 存进 props，须先在本表登记该键名，基座再据此重写——当前模型无此用法。另注意快照导出的“游戏实体”判据（本轮 A 组任务 1 已修订）：携带任何组件、标签、关系或名字的游戏实体都进快照（纯标签/纯关系实体可往返），flecs 基础设施实体（定义实体、flecs 命名空间）排除；未知 Rust 组件的值不序列化、仅在 unknown_components 字段列名，详见 docs/project/known_limitations.md (b)。
 
 ## 3. 派生状态（不进快照，必须可由因果状态重建）
 

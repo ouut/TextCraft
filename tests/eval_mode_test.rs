@@ -130,6 +130,90 @@ async fn test_eval_mode_blocks_write_tools_allows_reads() {
     server.handle.shutdown();
 }
 
+/// Run `call` in the server's VM, converting a raised error into its
+/// message string so gated facilities can be asserted on their text.
+fn gated_call(server: &mut TextCraftServer, call: &str) -> String {
+    let code = format!(
+        "(with-handler (lambda (e) (error-object-message e)) {})",
+        call
+    );
+    server
+        .logic
+        .eval_repl(&code)
+        .unwrap_or_else(|e| format!("REPL-ERR {}", e))
+}
+
+#[tokio::test]
+async fn test_eval_language_gate_blocks_nondet_facilities() {
+    let (mut server, _mcp) = make_server(true).await;
+
+    // Wall clock (steel/time, globally bound)
+    let msg = gated_call(&mut server, "(current-milliseconds)");
+    assert!(msg.contains("eval mode") && msg.contains("current-milliseconds"), "current-milliseconds must be gated: {}", msg);
+    let msg = gated_call(&mut server, "(current-second)");
+    assert!(msg.contains("eval mode"), "current-second must be gated: {}", msg);
+    let msg = gated_call(&mut server, "(system-time/now)");
+    assert!(msg.contains("eval mode"), "system-time/now must be gated: {}", msg);
+    // Environment (steel/meta)
+    let msg = gated_call(&mut server, "(env-var \"PATH\")");
+    assert!(msg.contains("eval mode") && msg.contains("env-var"), "env-var must be gated: {}", msg);
+    // The #%prim. spelling of the same binding is gated too
+    let msg = gated_call(&mut server, "(#%prim.env-var \"PATH\")");
+    assert!(msg.contains("eval mode"), "#%prim.env-var must be gated: {}", msg);
+    // File reads (steel/ports)
+    let msg = gated_call(&mut server, "(open-input-file \"/etc/hostname\")");
+    assert!(msg.contains("eval mode"), "open-input-file must be gated: {}", msg);
+    // Subprocesses (steel/process)
+    let msg = gated_call(&mut server, "(spawn-process (command \"echo\" (list \"x\")))");
+    assert!(msg.contains("eval mode"), "command/spawn-process must be gated: {}", msg);
+    // Fresh-VM escape hatch (steel/meta)
+    let msg = gated_call(&mut server, "(Engine::new)");
+    assert!(msg.contains("eval mode"), "Engine::new must be gated: {}", msg);
+    // OS-entropy random: require-builtin must NOT resurrect it in eval
+    server.logic.eval_repl("(require-builtin steel/random)").unwrap();
+    let msg = gated_call(&mut server, "(rng->gen-usize)");
+    assert!(msg.contains("eval mode"), "rng->gen-usize must stay gated after require: {}", msg);
+    // Deterministic host PRNG stays available in eval (guide item 3)
+    let out = server.logic.eval_repl("(engine:random-int 1 6)").unwrap();
+    assert!(out.starts_with("=>"), "seeded host PRNG stays available in eval: {}", out);
+
+    server.handle.shutdown();
+}
+
+#[tokio::test]
+async fn test_dev_language_surface_unchanged() {
+    let (mut server, _mcp) = make_server(false).await;
+
+    let out = server.logic.eval_repl("(current-milliseconds)").unwrap();
+    assert!(out.contains("=> 1"), "dev current-milliseconds works: {}", out);
+    let out = server.logic.eval_repl("(env-var \"PATH\")").unwrap();
+    assert!(out.len() > 10, "dev env-var works: {}", out);
+    server.logic.eval_repl("(require-builtin steel/random)").unwrap();
+    let out = server.logic.eval_repl("(rng->gen-range 0 100)").unwrap();
+    assert!(out.starts_with("=>"), "dev rng->gen-range works: {}", out);
+    let out = server
+        .logic
+        .eval_repl("(let ((p (open-input-file \"/etc/hostname\"))) (close-port p) \"opened\")")
+        .unwrap();
+    assert!(out.contains("opened"), "dev open-input-file works: {}", out);
+
+    server.handle.shutdown();
+}
+
+#[tokio::test]
+async fn test_language_gate_toggle_restores_dev_surface() {
+    let (mut server, _mcp) = make_server(false).await;
+    server.set_eval_mode(true);
+    let msg = gated_call(&mut server, "(current-milliseconds)");
+    assert!(msg.contains("eval mode"), "gate on must block: {}", msg);
+    server.set_eval_mode(false);
+    let out = server.logic.eval_repl("(current-milliseconds)").unwrap();
+    assert!(out.contains("=> 1"), "gate off must restore current-milliseconds: {}", out);
+    let out = server.logic.eval_repl("(env-var \"PATH\")").unwrap();
+    assert!(out.len() > 10, "gate off must restore env-var: {}", out);
+    server.handle.shutdown();
+}
+
 #[tokio::test]
 async fn test_dev_mode_keeps_full_v5_surface() {
     let (mut server, mcp) = make_server(false).await;

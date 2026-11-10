@@ -360,7 +360,133 @@ pub struct SchemeLogic {
     /// Model manifest (guide item 7); populated in `init()` from
     /// `model.json` when present, otherwise defaults are derived.
     pub model_manifest: snapshot::ModelManifest,
+    /// Eval language gate (B-group task 4): when `Some`, the gate is ON
+    /// and this map holds the original bindings of every gated facility
+    /// (only the ones that were bound before gating), for exact restore
+    /// when the gate is turned off. `None` means dev mode (gate off).
+    eval_gate_saved: Option<std::collections::HashMap<String, SteelVal>>,
 }
+
+/// Nondeterministic / host-dependent facilities reachable from model
+/// scripts in the Steel 0.8.3 VM (B-group task 4 investigation; verified
+/// by probe scripts against this project's VM, not just source reading):
+///
+/// * Directly bound in the global environment (via the kernel prelude /
+///   `ALL_MODULES`), no `require` needed:
+///   - steel/time: `current-milliseconds`, `current-second`,
+///     `current-inexact-milliseconds`, `system-time/now`,
+///     `instant/now`, `instant/elapsed`, `local-time/now!`,
+///     `naive-current-date-local`, `time/sleep-ms` (wall clock / sleep)
+///   - steel/meta: `env-var`, `maybe-get-env-var`, `set-env-var!`
+///     (process environment), `memory-address` (pointer values),
+///     `active-object-count` (GC state), `current-os!`, `target-arch!`,
+///     `steel-home-location` (host fingerprint), plus the code-loading
+///     escapes `eval`, `eval!`, `eval-string`, `load`, `Engine::new`,
+///     `Engine::clone`, `Engine::add-module`, `run!` (a fresh
+///     `Engine::new` would be an UNGATED VM — a total escape hatch)
+///   - steel/filesystem: `read-dir`, `read-dir-iter`, `glob`,
+///     `file-metadata`, `fs-metadata-modified/-accessed/-created`,
+///     `current-directory`, `change-current-directory!`, and the
+///     mutation verbs `delete-file!`, `create-directory!`,
+///     `delete-directory!`, `rename-file-or-directory!`,
+///     `copy-directory-recursively!`, `canonicalize-path`,
+///     `path-exists?`, `is-file?`, `is-dir?` (live filesystem state)
+///   - steel/ports + steel/io: `open-input-file`, `open-output-file`,
+///     `stdin`, `read-to-string` (arbitrary file / stdin reads)
+///   - steel/process: `command`, `spawn-process`, `which`
+///     (subprocess execution / PATH lookup)
+///   - The same fs/ports/meta/process/io names are ALSO bound under
+///     the `#%prim.` prefix by `ALL_MODULES`; both spellings are gated.
+/// * Bound only after `(require-builtin steel/random)` / `steel/time`,
+///   which a model script can do at load time or at runtime:
+///   `rng->gen-usize`, `rng->gen-range` (OS-entropy `rand::rng()`),
+///   and the steel/time names above. Gating therefore ALSO replaces
+///   the builtin-module registry entries (see
+///   `EVAL_GATED_MODULES`) with empty modules while gated, so a
+///   re-`require` cannot resurrect the real implementations
+///   (probe-verified: a plain global shadow IS undone by re-requiring
+///   the home module).
+/// * Checked and NOT gated: `gensym` / `eval-file` are unbound in this
+///   VM configuration (FreeIdentifier); host `engine:random-int` /
+///   `engine:raw-random-int` go through the seeded xoshiro256++ PRNG
+///   (guide item 3) and stay available; Steel hash-map iteration is
+///   deterministic in practice (the pinned epoch regression hash is
+///   stable), so it is not a facility that can be stubbed by name.
+pub const EVAL_GATED_FACILITIES: &[&str] = &[
+    // steel/time — wall clock
+    "current-milliseconds",
+    "current-second",
+    "current-inexact-milliseconds",
+    "system-time/now",
+    "instant/now",
+    "instant/elapsed",
+    "local-time/now!",
+    "naive-current-date-local",
+    "time/sleep-ms",
+    // steel/random — OS entropy (bound after require-builtin)
+    "rng->gen-usize",
+    "rng->gen-range",
+    // steel/meta — environment / host fingerprint / GC state
+    "env-var",
+    "maybe-get-env-var",
+    "set-env-var!",
+    "current-os!",
+    "target-arch!",
+    "steel-home-location",
+    "memory-address",
+    "active-object-count",
+    // steel/meta — code-loading escapes (fresh VM / dynamic eval / load)
+    "eval",
+    "eval!",
+    "eval-string",
+    "load",
+    "Engine::new",
+    "Engine::clone",
+    "Engine::add-module",
+    "run!",
+    // steel/filesystem — live filesystem state and mutation
+    "read-dir",
+    "read-dir-iter",
+    "glob",
+    "file-metadata",
+    "fs-metadata-modified",
+    "fs-metadata-accessed",
+    "fs-metadata-created",
+    "current-directory",
+    "change-current-directory!",
+    "delete-file!",
+    "create-directory!",
+    "delete-directory!",
+    "rename-file-or-directory!",
+    "copy-directory-recursively!",
+    "canonicalize-path",
+    "path-exists?",
+    "is-file?",
+    "is-dir?",
+    // steel/ports + steel/io — arbitrary file / stdin reads and writes
+    "open-input-file",
+    "open-output-file",
+    "stdin",
+    "read-to-string",
+    // steel/process — subprocesses
+    "command",
+    "spawn-process",
+    "which",
+];
+
+/// Builtin modules whose registry entries are replaced with empty
+/// modules while the eval language gate is on, so that
+/// `(require-builtin <module>)` during an epoch cannot resurrect the
+/// real nondeterministic implementations over the global stubs.
+pub const EVAL_GATED_MODULES: &[&str] = &[
+    "steel/time",
+    "steel/random",
+    "steel/meta",
+    "steel/filesystem",
+    "steel/ports",
+    "steel/process",
+    "steel/io",
+];
 
 impl SchemeLogic {
     /// Detect and update the cached set of defined Scheme hook functions.
@@ -622,7 +748,91 @@ impl SchemeLogic {
             mcp_storage,
             prng,
             model_manifest: snapshot::ModelManifest::default(),
+            eval_gate_saved: None,
         })
+    }
+
+    /// Eval language gate (B-group task 4): replace every facility in
+    /// `EVAL_GATED_FACILITIES` (both the plain and the `#%prim.`
+    /// spellings) with a variadic stub that raises an explicit
+    /// "eval mode: <name> is disabled in eval mode" error, and replace
+    /// the `EVAL_GATED_MODULES` registry entries with empty modules so
+    /// `(require-builtin ...)` cannot resurrect the real bindings.
+    /// Turning the gate off restores the original builtin modules and
+    /// the exact saved bindings. Dev mode (gate off) is bit-for-bit
+    /// the stock VM. Idempotent: gating an already-gated VM keeps the
+    /// FIRST saved originals.
+    pub fn set_eval_language_gate(&mut self, on: bool) {
+        if on {
+            if self.eval_gate_saved.is_some() {
+                return;
+            }
+            let mut saved = std::collections::HashMap::new();
+            let mut names: Vec<String> = EVAL_GATED_FACILITIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            for n in EVAL_GATED_FACILITIES {
+                names.push(format!("#%prim.{}", n));
+            }
+            // 1. Save originals (only for names that are bound).
+            for name in &names {
+                if let Ok(val) = self.app.extract_value(name) {
+                    saved.insert(name.clone(), val);
+                }
+            }
+            // 2. Neutralize the module registry so re-requiring a
+            //    gated module imports nothing.
+            for module_name in EVAL_GATED_MODULES {
+                self.app.engine.register_module(
+                    steel::steel_vm::builtin::BuiltInModule::new(module_name.to_string()),
+                );
+            }
+            // 3. Install the error stubs as the global bindings.
+            for name in &names {
+                let code = format!(
+                    "(lambda args (error \"eval mode: {} is disabled in eval mode (deterministic epoch)\"))",
+                    name
+                );
+                match self.app.engine.run(code) {
+                    Ok(vals) => {
+                        if let Some(stub) = vals.into_iter().last() {
+                            self.app.engine.register_value(name, stub);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(facility = %name, error = %e, "eval gate: failed to build stub")
+                    }
+                }
+            }
+            self.eval_gate_saved = Some(saved);
+        } else if let Some(saved) = self.eval_gate_saved.take() {
+            // Restore the real builtin modules, re-import the ones the
+            // kernel prelude had imported globally (plain + #%prim.),
+            // then put back every exact saved binding (covers the
+            // steel/time and steel/random names, which ALL_MODULES
+            // does not import).
+            steel::steel_vm::primitives::register_builtin_modules(&mut self.app.engine, false);
+            let _ = self.app.engine.run(
+                "(require-builtin steel/filesystem) (require-builtin steel/ports) \
+                 (require-builtin steel/meta) (require-builtin steel/process) \
+                 (require-builtin steel/io) \
+                 (require-builtin steel/filesystem as #%prim.) \
+                 (require-builtin steel/ports as #%prim.) \
+                 (require-builtin steel/meta as #%prim.) \
+                 (require-builtin steel/process as #%prim.) \
+                 (require-builtin steel/io as #%prim.)"
+                    .to_string(),
+            );
+            for (name, val) in saved {
+                self.app.engine.register_value(&name, val);
+            }
+        }
+    }
+
+    /// Whether the eval language gate is currently on for this VM.
+    pub fn eval_language_gated(&self) -> bool {
+        self.eval_gate_saved.is_some()
     }
 
     /// Sets or resets deterministic PRNG seed for Scheme random number generation.

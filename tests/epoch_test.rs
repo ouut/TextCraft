@@ -51,6 +51,18 @@ async fn test_run_epoch_deterministic_and_assertions() {
     assert!(r1["scripts_hash"].as_str().unwrap().len() == 64);
     assert!(r1["assertions_hash"].as_str().unwrap().len() == 64);
     assert!(r1["final_state_hash"].as_str().unwrap().len() == 64);
+    // Host fingerprint (task 5): compile-time constants only, so the
+    // byte-identical report assertion above already proves they carry
+    // no timestamps or other per-run values.
+    assert_eq!(r1["host"]["crate_version"], "5.0.0");
+    assert!(
+        r1["host"]["flecs_ecs_rev"].as_str().unwrap().starts_with("bf956db"),
+        "host fingerprint must pin the flecs_ecs rev: {}", r1["host"]
+    );
+    assert_eq!(r1["host"]["steel_core_version"], "0.8.3");
+    // dt provenance (task 6): epochs always step with a fixed dt.
+    assert_eq!(r1["dt"]["source"], "fixed");
+    assert!((r1["dt"]["value"].as_f64().unwrap() - 0.016).abs() < 0.001);
     server.handle.shutdown();
 }
 
