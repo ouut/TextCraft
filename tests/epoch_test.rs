@@ -116,7 +116,17 @@ async fn test_run_epoch_hash_changes_with_model_constant() {
 /// Fixed-epoch regression: seed/inputs/assertions and the expected final
 /// state hash are all pinned. If a host change alters epoch semantics,
 /// this fails loudly instead of silently drifting.
-const EXPECTED_FIXED_EPOCH_HASH: &str = "f91ceb60c7eae1bdfbdefeef2d377ac6bfce2d4764c6c4498bbc91531e1a2a75";
+///
+/// Updated 2026-11-10 (snapshot v3 / single-store migration): the hash
+/// changed from f91ceb60… to 28e8df35… purely because the storage
+/// LAYOUT changed — model state moved from the snapshot's separate
+/// `world_state` section into the ecs_world section (WorldState
+/// singleton entity), and the snapshot version field went 2 -> 3.
+/// Epoch BEHAVIOR is unchanged (same seed/inputs produce the same
+/// tick_count, balances and assertion results; the deterministic test
+/// above produces byte-identical reports across runs, and the new
+/// hash was observed identical in repeated independent runs).
+const EXPECTED_FIXED_EPOCH_HASH: &str = "28e8df35ce9950128beb046a2be4ca48eb32cb777def2285791b858b414c44ce";
 
 #[tokio::test]
 async fn test_fixed_epoch_regression_hash() {

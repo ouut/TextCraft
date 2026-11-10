@@ -1,0 +1,1 @@
+[{"expected":10,"op":"eq","path":"tick_count"},{"expected":946,"op":"eq","path":"accounts.alice.balance"},{"expected":416,"op":"eq","path":"accounts.bob.balance"},{"expected":22,"op":"eq","path":"merchant.inventory"},{"expected":126,"op":"eq","path":"merchant.till"},{"expected":12,"op":"eq","path":"trades"}]

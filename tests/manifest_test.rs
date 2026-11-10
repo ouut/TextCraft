@@ -22,33 +22,33 @@ fn test_manifest_loaded_and_snapshot_model_recorded() {
     logic.init().unwrap();
     assert_eq!(logic.model_manifest.name, "roguelike");
     assert_eq!(logic.model_manifest.state_schema, 1);
-    let snap = logic.export_snapshot_v2().unwrap();
+    let snap = logic.export_snapshot().unwrap();
     assert_eq!(snap["model"]["name"], "roguelike");
     assert_eq!(snap["model"]["state_schema"], 1);
     assert!(snap["model"]["scripts_hash"].as_str().unwrap().len() == 64);
     // Matching snapshot imports fine.
-    logic.import_snapshot_v2(&snap).unwrap();
+    logic.import_snapshot(&snap).unwrap();
 }
 
 #[test]
 fn test_snapshot_rejects_name_schema_version_mismatch() {
     let mut logic = SchemeLogic::new(roguelike_dir(), false, None).unwrap();
     logic.init().unwrap();
-    let snap = logic.export_snapshot_v2().unwrap();
+    let snap = logic.export_snapshot().unwrap();
 
     let mut bad_name = snap.clone();
     bad_name["model"]["name"] = serde_json::json!("other_model");
-    let err = logic.import_snapshot_v2(&bad_name).unwrap_err();
+    let err = logic.import_snapshot(&bad_name).unwrap_err();
     assert!(err.contains("model mismatch"), "name mismatch error: {}", err);
 
     let mut bad_schema = snap.clone();
     bad_schema["model"]["state_schema"] = serde_json::json!(99);
-    let err = logic.import_snapshot_v2(&bad_schema).unwrap_err();
+    let err = logic.import_snapshot(&bad_schema).unwrap_err();
     assert!(err.contains("state_schema mismatch"), "schema mismatch error: {}", err);
 
     let mut bad_version = snap.clone();
     bad_version["version"] = serde_json::json!(99);
-    let err = logic.import_snapshot_v2(&bad_version).unwrap_err();
+    let err = logic.import_snapshot(&bad_version).unwrap_err();
     assert!(err.contains("version"), "version error: {}", err);
 }
 
@@ -66,9 +66,13 @@ fn test_manifestless_model_still_starts() {
     assert_eq!(logic.model_manifest.state_schema, 1);
     // It ticks and snapshots with the derived default identity.
     logic.on_tick(0.016, 1).unwrap();
-    let snap = logic.export_snapshot_v2().unwrap();
+    let snap = logic.export_snapshot().unwrap();
     assert_eq!(snap["model"]["name"], "default");
-    assert_eq!(snap["world_state"]["tick_count"], 1);
-    logic.import_snapshot_v2(&snap).unwrap();
+    assert_eq!(snap["tick"], 1);
+    // v3: tick_count lives in the WorldState singleton's props inside ecs_world.
+    let ws = snap["ecs_world"]["entities"].as_array().unwrap().iter()
+        .find(|e| e["name"] == "WorldState").expect("WorldState singleton in snapshot");
+    assert_eq!(ws["dynamic_props"]["tick_count"], 1);
+    logic.import_snapshot(&snap).unwrap();
     let _ = std::fs::remove_dir_all(&tmp);
 }

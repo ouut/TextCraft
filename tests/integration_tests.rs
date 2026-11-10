@@ -858,15 +858,19 @@ async fn test_8_state_persistence_shutdown_and_restart() {
         server.logic.save_state_to_file().unwrap();
         assert!(save_file.exists(), "Save file should be written to disk");
 
-        // Verify JSON contents on disk (snapshot v2 save format, item 2:
-        // the world state lives under "world_state" in the wrapper)
+        // Verify JSON contents on disk (snapshot v3 save format: no
+        // world_state section; player state lives in the WorldState
+        // singleton entity's dynamic_props inside ecs_world)
         let file_content = std::fs::read_to_string(&save_file).unwrap();
         let json_val: serde_json::Value = serde_json::from_str(&file_content).unwrap();
         assert_eq!(json_val["format"], "textcraft-snapshot");
-        assert_eq!(json_val["version"], 2);
-        assert_eq!(json_val["world_state"]["players"]["42"]["gold"], 888);
-        assert_eq!(json_val["world_state"]["players"]["42"]["x"], 5);
-        assert_eq!(json_val["world_state"]["players"]["42"]["y"], 5);
+        assert_eq!(json_val["version"], 3);
+        assert!(json_val.get("world_state").is_none());
+        let ws_ent = json_val["ecs_world"]["entities"].as_array().unwrap().iter()
+            .find(|e| e["name"] == "WorldState").expect("WorldState singleton in save file");
+        assert_eq!(ws_ent["dynamic_props"]["players"]["42"]["gold"], 888);
+        assert_eq!(ws_ent["dynamic_props"]["players"]["42"]["x"], 5);
+        assert_eq!(ws_ent["dynamic_props"]["players"]["42"]["y"], 5);
 
         // Server handle shuts down
         server.handle.shutdown();

@@ -1,5 +1,5 @@
-//! Guide item 2 acceptance (revised by the scope ruling): snapshot v2
-//! rollback is validated with GENERIC ECS content — entities carrying
+//! Guide item 2 acceptance (revised by the scope ruling), updated for
+//! snapshot v3 (single-store migration): rollback is validated with GENERIC ECS content — entities carrying
 //! props / tags / relationships built through the raw `ecs:*` primitives —
 //! not with roguelike gameplay scenarios. The roguelike package under
 //! models/roguelike serves only as the loading fixture (it provides the
@@ -30,7 +30,7 @@ fn part_by_kind<'a>(snap: &'a serde_json::Value, kind: &str) -> Option<&'a serde
 }
 
 #[test]
-fn test_snapshot_v2_generic_rollback() {
+fn test_snapshot_v3_generic_rollback() {
     let mut logic = SchemeLogic::new(get_scripts_dir(), false, None).unwrap();
     logic.init().unwrap();
     logic.on_player_join(1, "token_1").unwrap();
@@ -63,9 +63,10 @@ fn test_snapshot_v2_generic_rollback() {
     let player_x_before = logic.export_state().unwrap()["players"]["1"]["x"].clone();
 
     // ---- Host checkpoint ---------------------------------------------------
-    let snap = logic.export_snapshot_v2().unwrap();
+    let snap = logic.export_snapshot().unwrap();
     assert_eq!(snap["format"], "textcraft-snapshot");
-    assert_eq!(snap["version"], 2);
+    assert_eq!(snap["version"], 3);
+    assert!(snap.get("world_state").is_none(), "v3 snapshot must not contain a world_state section: {}", snap);
     assert_eq!(part_by_kind(&snap, "arm").unwrap()["dynamic_props"]["severed"], true);
     let leg = part_by_kind(&snap, "leg").expect("leg in snapshot");
     assert_eq!(leg["dynamic_props"]["severed"], false);
@@ -99,19 +100,19 @@ fn test_snapshot_v2_generic_rollback() {
             alt: false,
         },
     );
-    let mutated = logic.export_snapshot_v2().unwrap();
+    let mutated = logic.export_snapshot().unwrap();
     assert_eq!(part_by_kind(&mutated, "leg").unwrap()["dynamic_props"]["severed"], true);
     assert!(part_by_kind(&mutated, "stray").is_some());
 
     // ---- Roll back ---------------------------------------------------------
-    let id_map = logic.import_snapshot_v2(&snap).unwrap();
+    let id_map = logic.import_snapshot(&snap).unwrap();
     assert!(
         id_map.iter().all(|(a, b)| a == b),
         "entity ids preserved on import: {:?}",
         id_map
     );
 
-    let restored = logic.export_snapshot_v2().unwrap();
+    let restored = logic.export_snapshot().unwrap();
     let leg2 = part_by_kind(&restored, "leg").expect("leg after restore");
     assert_eq!(leg2["id"].as_u64().unwrap(), leg_id);
     assert_eq!(leg2["dynamic_props"]["severed"], false, "post-checkpoint sever undone");
@@ -233,12 +234,12 @@ fn test_export_count_matches_game_entities_no_infra_leak() {
 }
 
 #[test]
-fn test_snapshot_v2_rejects_v1_shape() {
+fn test_snapshot_rejects_v1_shape() {
     let mut logic = SchemeLogic::new(get_scripts_dir(), false, None).unwrap();
     logic.init().unwrap();
     // A bare *world-state* (v1 checkpoint shape) has no version field.
     let v1 = logic.export_state().unwrap();
-    let err = logic.import_snapshot_v2(&v1).unwrap_err();
+    let err = logic.import_snapshot(&v1).unwrap_err();
     assert!(err.contains("version"), "explicit version error, got: {}", err);
 }
 
@@ -252,7 +253,7 @@ fn test_host_checkpoint_roundtrip_via_logic_api() {
     logic.create_checkpoint("cp1").unwrap();
     logic.eval_repl(r#"(ecs:set e1 "n" 99)"#).unwrap();
     assert!(logic.rollback_checkpoint("cp1").unwrap());
-    let snap = logic.export_snapshot_v2().unwrap();
+    let snap = logic.export_snapshot().unwrap();
     let ent = find_entity(&snap, |e| e["dynamic_props"]["kind"] == "cp").unwrap();
     assert_eq!(ent["dynamic_props"]["n"], 1);
     assert!(!logic.rollback_checkpoint("missing_tag").unwrap());

@@ -8,13 +8,11 @@
 ;; ----------------------------------------------------------------------------
 
 (define (touch-activity!)
-  (set! *world-state*
-    (hash-insert
-      (hash-insert *world-state* "idle_timer" 0.0)
-      "target_fps" 60)))
+  (state:set! "idle_timer" 0.0)
+  (state:set! "target_fps" 60))
 
 (define (set-target-fps! fps)
-  (set! *world-state* (hash-insert *world-state* "target_fps" fps)))
+  (state:set! "target_fps" fps))
 
 ;; ----------------------------------------------------------------------------
 ;; Inventory Helpers
@@ -170,7 +168,7 @@
                   "x" 7 "y" 3 "hp" 30 "max_hp" 30 "attack" 6))
         (m2 (hash "id" "orc_1" "name" "半兽人" "glyph" "O" "fg" '(240 100 80)
                   "x" -7 "y" 3 "hp" 60 "max_hp" 60 "attack" 12)))
-    (set! *world-state* (hash-insert *world-state* "monsters" (list m1 m2)))
+    (state:set! "monsters" (list m1 m2))
     (world:set-tile 7 3 'actor
       (hash "glyph" "g" "fg" '(80 230 80) "bg" #f "solid" #t "name" "goblin" "meta" m1))
     (world:set-tile -7 3 'actor
@@ -198,7 +196,7 @@
 ;; ----------------------------------------------------------------------------
 
 (define (engine:target-fps)
-  (let ((fps (map-get *world-state* "target_fps" 60)))
+  (let ((fps (state:get "target_fps" 60)))
     (if (number? fps)
         fps
         60)))
@@ -226,7 +224,7 @@
          (auth-tok (map-get parsed "auth_token" ""))
          (id-key (map-get parsed "identity_key" ""))
          (_ (evict-duplicate-identity! pid id-key))
-         (saved (map-get *world-state* "saved_players" (hash)))
+         (saved (state:get "saved_players" (hash)))
          (saved-p (if (not (string=? id-key ""))
                       (map-get saved id-key #f)
                       #f)))
@@ -333,17 +331,16 @@
 
 (define (engine:on-tick dt tick-id)
   (set! *current-tick* tick-id)
-  (let* ((old-ticks (map-get *world-state* "tick_count" 0))
-         (old-elapsed (map-get *world-state* "elapsed_sec" 0.0))
-         (old-idle (map-get *world-state* "idle_timer" 0.0))
+  (let* ((old-ticks (state:get "tick_count" 0))
+         (old-elapsed (state:get "elapsed_sec" 0.0))
+         (old-idle (state:get "idle_timer" 0.0))
          (new-elapsed (+ old-elapsed dt))
          (new-idle (+ old-idle dt)))
-    (set! *world-state*
-      (hash-insert
-        (hash-insert
-          (hash-insert *world-state* "tick_count" (+ old-ticks 1))
-          "elapsed_sec" new-elapsed)
-        "idle_timer" new-idle))
+    ;; tick_count is the authoritative simulation clock; since
+    ;; snapshot v3 it lives in the ECS world-state singleton.
+    (state:set! "tick_count" (+ old-ticks 1))
+    (state:set! "elapsed_sec" new-elapsed)
+    (state:set! "idle_timer" new-idle)
 
     ;; Dynamic FPS adaptation based on inactivity
     (cond
@@ -358,8 +355,8 @@
 
     ;; Monster AI execution every ~30 ticks
     (if (= (modulo (+ old-ticks 1) 30) 0)
-        (let* ((monsters (map-get *world-state* "monsters" '()))
-               (players (map-get *world-state* "players" (hash)))
+        (let* ((monsters (state:get "monsters" '()))
+               (players (state:get "players" (hash)))
                (p-keys (hash-keys->list players)))
           (if (not (null? p-keys))
               (let ((new-monsters '()))
@@ -370,7 +367,7 @@
                            (mhp (map-get m "hp" 0))
                            (mname (map-get m "name" "怪物"))
                            (mattack (map-get m "attack" 5))
-                           (cur-players (map-get *world-state* "players" (hash)))
+                           (cur-players (state:get "players" (hash)))
                            (cur-p-keys (hash-keys->list cur-players))
                            ;; Find closest online player by Manhattan distance
                            (nearest-info
@@ -443,7 +440,7 @@
                               (set! new-monsters (cons m new-monsters)))
                           #f)))
                   monsters)
-                (set! *world-state* (hash-insert *world-state* "monsters" (reverse new-monsters))))
+                (state:set! "monsters" (reverse new-monsters)))
               #f))
         #f))
   'ok)
@@ -506,7 +503,7 @@
                                   (hash "glyph" "$" "fg" '(255 215 0) "bg" #f "solid" #f
                                         "name" "gold_coins" "meta" (hash "amount" 35)))
                                 ;; Update monsters in world state
-                                (let* ((ms (map-get *world-state* "monsters" '()))
+                                (let* ((ms (state:get "monsters" '()))
                                        (filtered
                                          (let filter-ms ((l ms))
                                            (if (null? l)
@@ -515,7 +512,7 @@
                                                         (= (map-get (car l) "y" 0) ny))
                                                    (filter-ms (cdr l))
                                                    (cons (car l) (filter-ms (cdr l))))))))
-                                  (set! *world-state* (hash-insert *world-state* "monsters" filtered)))
+                                  (state:set! "monsters" filtered))
                                 (player:add-log pid "combat"
                                   (string-append "你发动强力斩击，斩杀了 " mname "！地上掉落了金币！")))
                               ;; Monster wounded
@@ -523,7 +520,7 @@
                                      (updated-tile (hash-insert actor-tile "meta" updated-meta)))
                                 (world:set-tile nx ny 'actor updated-tile)
                                 ;; Update monsters list
-                                (let* ((ms (map-get *world-state* "monsters" '()))
+                                (let* ((ms (state:get "monsters" '()))
                                        (updated-ms
                                          (let update-ms ((l ms))
                                            (if (null? l)
@@ -533,7 +530,7 @@
                                                           (= (map-get m "y" 0) ny))
                                                      (cons (hash-insert m "hp" next-mhp) (update-ms (cdr l)))
                                                      (cons m (update-ms (cdr l)))))))))
-                                  (set! *world-state* (hash-insert *world-state* "monsters" updated-ms)))
+                                  (state:set! "monsters" updated-ms))
                                 (player:add-log pid "combat"
                                   (string-append "你攻击了 " mname "，造成 " (number->string dmg)
                                                  " 点伤害！(剩余HP: " (number->string next-mhp) ")"))))))
@@ -729,7 +726,7 @@
        (let* ((txt (if (string? (cadr datum)) (cadr datum) (to-string (cadr datum))))
               (pname (map-get p "name" (string-append "Hero_" (to-string pid))))
               (msg (string-append pname " 说: " txt))
-              (players (map-get *world-state* "players" (hash))))
+              (players (state:get "players" (hash))))
          (for-each
            (lambda (k)
              (let ((op (hash-ref players k)))
@@ -771,12 +768,12 @@
       "hud" hud)))
 
 (define (engine:export-state)
-  *world-state*)
+  (state:all))
 
 (define (engine:import-state data)
   (if (hash? data)
       (begin
-        (set! *world-state* data)
+        (state:replace! data)
         (bump-visual-version!)
         'ok)
       'error))
@@ -791,7 +788,7 @@
   "Get global world summary including tick_count, target_fps, online/offline player states, and active monsters (excluding bulky chunk tile data)."
   (hash "type" "object" "properties" (hash))
   (lambda (args)
-    (let* ((players-map (map-get *world-state* "players" (hash)))
+    (let* ((players-map (state:get "players" (hash)))
            (summarize-player
              (lambda (p)
                (hash
@@ -812,11 +809,11 @@
                    (reverse acc)
                    (loop (cdr ks) (cons (summarize-player (hash-ref players-map (car ks))) acc))))))
       (hash
-        "tick_count" (map-get *world-state* "tick_count" 0)
-        "elapsed_sec" (map-get *world-state* "elapsed_sec" 0.0)
-        "target_fps" (map-get *world-state* "target_fps" 60)
+        "tick_count" (state:get "tick_count" 0)
+        "elapsed_sec" (state:get "elapsed_sec" 0.0)
+        "target_fps" (state:get "target_fps" 60)
         "players" active-players
-        "monsters" (map-get *world-state* "monsters" '())))))
+        "monsters" (state:get "monsters" '())))))
 
 (mcp:def-tool
   "get_viewport"
@@ -875,7 +872,7 @@
 
 (mcp:def-tool
   "spawn_monster"
-  "Dynamically spawn a new monster at (x, y), register it in *world-state* and the actor tile layer, and broadcast a server-wide alert."
+  "Dynamically spawn a new monster at (x, y), register it in the world state (ECS singleton, via state:set!) and the actor tile layer, and broadcast a server-wide alert."
   (hash
     "type" "object"
     "properties" (hash
@@ -906,13 +903,13 @@
                 "hp" mhp
                 "max_hp" mhp
                 "attack" mattack))
-           (old-ms (map-get *world-state* "monsters" '()))
+           (old-ms (state:get "monsters" '()))
            (new-ms (append old-ms (list m)))
            (msg (string-append "[mcp] 警告：新怪物 " mname " (" mglyph ") 出现在 (" (number->string mx) ", " (number->string my) ")！")))
-      (set! *world-state* (hash-insert *world-state* "monsters" new-ms))
+      (state:set! "monsters" new-ms)
       (world:set-tile mx my 'actor
         (hash "glyph" mglyph "fg" fg "bg" #f "solid" #t "name" mname "meta" m))
-      (let ((players (map-get *world-state* "players" (hash))))
+      (let ((players (state:get "players" (hash))))
         (for-each
           (lambda (k)
             (let ((op (hash-ref players k)))

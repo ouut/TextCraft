@@ -91,11 +91,11 @@
 ;; ----------------------------------------------------------------------------
 
 (define (engine:set-double-width! enabled?)
-  (set! *world-state* (hash-insert *world-state* "double_width" (if enabled? #t #f)))
+  (state:set! "double_width" (if enabled? #t #f))
   (bump-visual-version!))
 
 (define (engine:double-width?)
-  (map-get *world-state* "double_width" #f))
+  (state:get "double_width" #f))
 
 (define (player:double-width? player-id)
   (let ((p (get-player player-id)))
@@ -105,16 +105,23 @@
         (engine:double-width?))))
 
 ;; ----------------------------------------------------------------------------
-;; Global World State (Pure Data - Zero Lambdas/Closures)
+;; Global World State (snapshot v3: ECS-resident, NOT a Scheme variable)
 ;; ----------------------------------------------------------------------------
+;; All causal state lives in the host-managed ECS singleton entity
+;; `WorldState` (its DynamicProps), accessed only through the host
+;; facade: (state:get key [default]), (state:set! key val),
+;; (state:has? key), (state:remove! key), (state:all),
+;; (state:replace! hash), (state:seed-defaults! hash).
+;; The seed below only fills MISSING keys, so reloading this prelude
+;; over a live world does not wipe state. There is intentionally no
+;; *world-state* variable any more: state has exactly one home.
 
-(define *world-state*
+(state:seed-defaults!
   (hash
     "tick_count" 0
     "elapsed_sec" 0.0
     "target_fps" 60
     "idle_timer" 0.0
-    "chunks" (hash)
     "players" (hash)
     "saved_players" (hash)
     "monsters" '()
@@ -141,10 +148,28 @@
 ;; ----------------------------------------------------------------------------
 ;; 16x16 Chunked World Storage (Synchronized with Flecs ECS)
 ;; ----------------------------------------------------------------------------
+;; Storage granularity (v3 migration detail): each chunk is its OWN
+;; top-level key in the world-state singleton, "chunk:<cx>,<cy>" ->
+;; (hash "tiles" (hash <tile-key> <tile-map>)). Keeping the whole map
+;; under one "chunks" key would force every tile read/write to
+;; deep-convert the entire world map through the JSON-backed facade;
+;; per-chunk keys bound that cost to one 16x16 chunk. The state as a
+;; whole is unchanged in content — only its key layout differs.
+;; Legacy layout: a pre-v3 snapshot/save may still carry the single
+;; "chunks" key; world:ensure-chunks splits it into per-chunk keys
+;; and removes it, on first touch.
+
+(define (chunk-state-key ckey)
+  (string-append "chunk:" ckey))
 
 (define (world:ensure-chunks)
-  (if (not (hash-contains? *world-state* "chunks"))
-      (set! *world-state* (hash-insert *world-state* "chunks" (hash)))
+  (if (state:has? "chunks")
+      (let ((legacy (state:get "chunks" (hash))))
+        (for-each
+          (lambda (ckey)
+            (state:set! (chunk-state-key ckey) (hash-ref legacy ckey)))
+          (hash-keys->list legacy))
+        (state:remove! "chunks"))
       #f))
 
 (define (world:set-tile x y layer tile-map)
@@ -152,14 +177,13 @@
   (let* ((cx (coord->chunk-coord x))
          (cy (coord->chunk-coord y))
          (ckey (chunk-key cx cy))
+         (skey (chunk-state-key ckey))
          (tkey (tile-key x y layer))
-         (chunks (map-get *world-state* "chunks" (hash)))
-         (chunk (map-get chunks ckey (hash "tiles" (hash))))
+         (chunk (state:get skey (hash "tiles" (hash))))
          (tiles (map-get chunk "tiles" (hash)))
          (new-tiles (hash-insert tiles tkey tile-map))
-         (new-chunk (hash-insert chunk "tiles" new-tiles))
-         (new-chunks (hash-insert chunks ckey new-chunk)))
-    (set! *world-state* (hash-insert *world-state* "chunks" new-chunks))
+         (new-chunk (hash-insert chunk "tiles" new-tiles)))
+    (state:set! skey new-chunk)
     ;; Synchronize into Flecs ECS
     (let* ((lnum (world:layer->layer-num layer))
            (glyph (map-get tile-map "glyph" " "))
@@ -183,30 +207,30 @@
     tile-map))
 
 (define (world:get-tile x y layer)
+  (world:ensure-chunks)
   (let* ((cx (coord->chunk-coord x))
          (cy (coord->chunk-coord y))
          (ckey (chunk-key cx cy))
-         (chunks (map-get *world-state* "chunks" (hash)))
-         (chunk (map-get chunks ckey #f)))
+         (chunk (state:get (chunk-state-key ckey) #f)))
     (if chunk
         (let ((tiles (map-get chunk "tiles" (hash))))
           (map-get tiles (tile-key x y layer) #f))
         #f)))
 
 (define (world:remove-tile x y layer)
+  (world:ensure-chunks)
   (let* ((cx (coord->chunk-coord x))
          (cy (coord->chunk-coord y))
          (ckey (chunk-key cx cy))
+         (skey (chunk-state-key ckey))
          (tkey (tile-key x y layer))
-         (chunks (map-get *world-state* "chunks" (hash)))
-         (chunk (map-get chunks ckey #f)))
+         (chunk (state:get skey #f)))
     (if chunk
         (let ((tiles (map-get chunk "tiles" (hash))))
           (if (hash-contains? tiles tkey)
               (let* ((new-tiles (hash-remove tiles tkey))
-                     (new-chunk (hash-insert chunk "tiles" new-tiles))
-                     (new-chunks (hash-insert chunks ckey new-chunk)))
-                (set! *world-state* (hash-insert *world-state* "chunks" new-chunks))
+                     (new-chunk (hash-insert chunk "tiles" new-tiles)))
+                (state:set! skey new-chunk)
                 ;; Despawn from Flecs ECS
                 (let ((lnum (world:layer->layer-num layer)))
                   (for-each ecs:despawn (ecs:at x y lnum)))
@@ -216,10 +240,16 @@
         #f)))
 
 (define (world:clear!)
-  (set! *world-state*
-    (hash-insert
-      (hash-insert *world-state* "chunks" (hash))
-      "monsters" '()))
+  ;; ecs:clear! preserves the world-state singleton (host guarantee),
+  ;; so clearing tiles/entities does not touch other state keys.
+  (world:ensure-chunks)
+  (for-each
+    (lambda (k)
+      (if (and (>= (string-length k) 6) (string=? (substring k 0 6) "chunk:"))
+          (state:remove! k)
+          #f))
+    (state:keys))
+  (state:set! "monsters" '())
   (ecs:clear!)
   (bump-visual-version!))
 
@@ -269,7 +299,7 @@
 (define (evict-duplicate-identity! player-id id-key)
   (if (and (string? id-key) (not (string=? id-key "")))
       (let* ((pid-key (to-string player-id))
-             (players (map-get *world-state* "players" (hash)))
+             (players (state:get "players" (hash)))
              (cleaned
                (let ((res players))
                  (for-each
@@ -282,7 +312,7 @@
                          #f))
                    (hash-keys->list players))
                  res)))
-        (set! *world-state* (hash-insert *world-state* "players" cleaned)))
+        (state:set! "players" cleaned))
       #f))
 
 (define (make-default-player player-id raw-token)
@@ -324,7 +354,7 @@
 
 (define (get-player player-id)
   (let* ((pid-key (to-string player-id))
-         (players (map-get *world-state* "players" (hash))))
+         (players (state:get "players" (hash))))
     (map-get players pid-key #f)))
 
 (define (ensure-player player-id)
@@ -338,32 +368,30 @@
 ;; Pure O(1) player state update & saved_players synchronization
 (define (set-player player-id player-map)
   (let* ((pid-key (to-string player-id))
-         (players (map-get *world-state* "players" (hash)))
+         (players (state:get "players" (hash)))
          (new-players (hash-insert players pid-key player-map))
-         (ws1 (hash-insert *world-state* "players" new-players))
          (id-key (player-identity-key player-map)))
+    (state:set! "players" new-players)
     (if (and (string? id-key) (not (string=? id-key "")))
-        (let* ((saved (map-get ws1 "saved_players" (hash)))
+        (let* ((saved (state:get "saved_players" (hash)))
                (new-saved (hash-insert saved id-key player-map)))
-          (set! *world-state* (hash-insert ws1 "saved_players" new-saved)))
-        (set! *world-state* ws1))
+          (state:set! "saved_players" new-saved))
+        #f)
     (bump-visual-version!)))
 
 (define (remove-player player-id)
   (let* ((pid-key (to-string player-id))
-         (players (map-get *world-state* "players" (hash)))
-         (cur-p (map-get players pid-key #f))
-         (ws0 (if cur-p
-                  (let ((id-key (player-identity-key cur-p)))
-                    (if (and (string? id-key) (not (string=? id-key "")))
-                        (let* ((saved (map-get *world-state* "saved_players" (hash)))
-                               (new-saved (hash-insert saved id-key cur-p)))
-                          (hash-insert *world-state* "saved_players" new-saved))
-                        *world-state*))
-                  *world-state*)))
-    (set! *world-state*
-      (hash-insert ws0 "players"
-        (hash-remove players pid-key)))
+         (players (state:get "players" (hash)))
+         (cur-p (map-get players pid-key #f)))
+    (if cur-p
+        (let ((id-key (player-identity-key cur-p)))
+          (if (and (string? id-key) (not (string=? id-key "")))
+              (let* ((saved (state:get "saved_players" (hash)))
+                     (new-saved (hash-insert saved id-key cur-p)))
+                (state:set! "saved_players" new-saved))
+              #f))
+        #f)
+    (state:set! "players" (hash-remove players pid-key))
     (bump-visual-version!)))
 
 (define (engine:on-player-disconnect pid)
@@ -527,7 +555,8 @@
         (string-append fg-str bg-str glyph-str *ansi-reset*))))
 
 (define (render-viewport-ansi player-id cols rows)
-  (let* ((p (get-player player-id))
+  (let* ((_mig (world:ensure-chunks))
+         (p (get-player player-id))
          (px (if p (map-get p "x" 0) 0))
          (py (if p (map-get p "y" 0) 0))
          (is-dw (or (engine:double-width?) (player:double-width? player-id)))
@@ -537,8 +566,17 @@
          (left (- px half-w))
          (top (- py half-h))
          (self-tile (hash "glyph" "@" "fg" '(255 255 100) "bg" #f "solid" #t "name" "hero"))
-         (chunks (map-get *world-state* "chunks" (hash)))
-         (players (map-get *world-state* "players" (hash)))
+         ;; Fetch every chunk ONCE per render into a local map (per-chunk
+         ;; state keys, keyed here by plain chunk-key for the cell loop).
+         (chunks (let ((res (hash)))
+                   (for-each
+                     (lambda (k)
+                       (if (and (>= (string-length k) 6) (string=? (substring k 0 6) "chunk:"))
+                           (set! res (hash-insert res (substring k 6 (string-length k)) (state:get k #f)))
+                           #f))
+                     (state:keys))
+                   res))
+         (players (state:get "players" (hash)))
          (cur-pid-key (to-string player-id))
          ;; Pre-index other ONLINE players by coordinate for O(1) lookup
          (other-player-map
@@ -814,18 +852,19 @@
 ;; ----------------------------------------------------------------------------
 ;; Model-local checkpoint helpers (EXAMPLE MODEL ONLY — not base behavior)
 ;; ----------------------------------------------------------------------------
-;; Per the simulator-base scope ruling, snapshot v2 checkpoints are a HOST
+;; Per the simulator-base scope ruling, snapshot checkpoints are a HOST
 ;; feature: the Rust host provides the MCP tools `create_checkpoint` /
-;; `rollback_checkpoint` backed by SchemeLogic::export_snapshot_v2 /
-;; import_snapshot_v2. This model no longer registers those tools itself.
-;; The two helpers below are kept as legacy model-local conveniences that
-;; only stash *world-state*; they are NOT full snapshots and must not be
+;; `rollback_checkpoint` backed by SchemeLogic::export_snapshot /
+;; import_snapshot (snapshot v3). This model no longer registers those
+;; tools itself. The two helpers below are kept as legacy model-local
+;; conveniences that only stash the model's own state keys (read via
+;; the state facade); they are NOT full snapshots and must not be
 ;; used as evaluation checkpoints.
 
 (define (checkpoint:save tag)
   (let* ((str-tag (if (string? tag) tag (to-string tag)))
          (safe-tag (if (string=? str-tag "") "latest" str-tag)))
-    (engine:raw-mcp-store-set! safe-tag *world-state* "checkpoint")
+    (engine:raw-mcp-store-set! safe-tag (state:all) "checkpoint")
     safe-tag))
 
 (define (checkpoint:restore tag)
@@ -834,7 +873,7 @@
          (saved (engine:raw-mcp-store-get safe-tag "checkpoint")))
     (if saved
         (begin
-          (set! *world-state* saved)
+          (state:replace! saved)
           (bump-visual-version!)
           #t)
         #f)))

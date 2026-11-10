@@ -407,11 +407,15 @@ async fn test_checkpoint_and_time_travel_rollback() {
     let stored_cp = server.mcp_store_get_scoped(Some("checkpoint"), "initial");
     assert!(stored_cp.is_some(), "Checkpoint 'initial' must be stored in mcp-store under 'checkpoint' namespace");
     let cp_val = stored_cp.unwrap();
-    // Snapshot v2 shape (guide item 2): world_state is nested in the wrapper.
+    // Snapshot v3 shape: no world_state section; model state lives in
+    // the WorldState singleton entity's dynamic_props inside ecs_world.
     assert_eq!(cp_val["format"], "textcraft-snapshot");
-    assert_eq!(cp_val["version"], 2);
-    assert!(cp_val["world_state"].get("players").is_some());
-    assert_eq!(cp_val["world_state"]["players"]["1"]["x"], init_x);
+    assert_eq!(cp_val["version"], 3);
+    assert!(cp_val.get("world_state").is_none());
+    let cp_ws = cp_val["ecs_world"]["entities"].as_array().unwrap().iter()
+        .find(|e| e["name"] == "WorldState").expect("WorldState singleton in checkpoint");
+    assert!(cp_ws["dynamic_props"].get("players").is_some());
+    assert_eq!(cp_ws["dynamic_props"]["players"]["1"]["x"], init_x);
     assert!(cp_val["ecs_world"]["entities"].is_array());
 
     // 3. Advance simulation and modify game state: step 20 ticks, inject move KeyD
@@ -464,7 +468,9 @@ async fn test_checkpoint_and_time_travel_rollback() {
 
     let stored_after = server.mcp_store_get_scoped(Some("checkpoint"), "after_move");
     assert!(stored_after.is_some());
-    assert_eq!(stored_after.unwrap()["world_state"]["players"]["1"]["x"], moved_x);
+    let after_ws = stored_after.unwrap()["ecs_world"]["entities"].as_array().unwrap().iter()
+        .find(|e| e["name"] == "WorldState").expect("WorldState singleton in checkpoint").clone();
+    assert_eq!(after_ws["dynamic_props"]["players"]["1"]["x"], moved_x);
 
     let cp_keys = server.mcp_store_list_scoped(Some("checkpoint"), None);
     assert!(cp_keys.contains(&"initial".to_string()));

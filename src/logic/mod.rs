@@ -354,7 +354,7 @@ pub struct SchemeLogic {
     rasterizer: Arc<Mutex<ViewportRasterizer>>,
     pub mcp_storage: McpStorage,
     /// The one and only random source (guide item 3): serializable
-    /// xoshiro256++ whose state is part of snapshot v2. No `StdRng`,
+    /// xoshiro256++ whose state is part of snapshot v3. No `StdRng`,
     /// no `thread_rng` fallback anywhere in the host.
     prng: Arc<parking_lot::Mutex<prng::Prng>>,
     /// Model manifest (guide item 7); populated in `init()` from
@@ -530,6 +530,13 @@ impl SchemeLogic {
         let rasterizer = Arc::new(Mutex::new(ViewportRasterizer::new()));
         let mcp_storage: McpStorage = Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
         let prng = Arc::new(parking_lot::Mutex::new(prng::Prng::default()));
+
+        // Snapshot v3: eagerly create the host-managed world-state
+        // singleton entity so its Flecs id is fixed (first spawn in a
+        // fresh world) and does not depend on when a model first
+        // touches state. All model causal state lives in this
+        // entity's DynamicProps from now on.
+        ecs_ffi::ensure_world_state_entity(&mut ecs_world.lock());
 
         // Register ECS primitives
         ecs_ffi::register_ecs_primitives(
@@ -840,7 +847,7 @@ impl SchemeLogic {
         *self.prng.lock() = prng::Prng::from_seed(seed.unwrap_or(0));
     }
 
-    /// Current serializable PRNG state (snapshot v2 `prng.state`).
+    /// Current serializable PRNG state (snapshot `prng.state`).
     pub fn prng_state(&self) -> [u64; 4] {
         self.prng.lock().state()
     }
@@ -1243,8 +1250,21 @@ impl SchemeLogic {
         }
     }
 
+    /// The authoritative model state, read directly from the ECS
+    /// world-state singleton entity (snapshot v3: this IS the state;
+    /// there is no Scheme-side store behind it).
+    pub fn world_state_json(&self) -> Value {
+        ecs_ffi::world_state_json(&mut self.ecs_world.lock())
+    }
+
     /// Export world state as JSON value via `(engine:export-state)`.
+    /// Migrated models implement that hook as `(state:all)`, so the
+    /// result is exactly the ECS singleton's contents. Models without
+    /// the hook fall back to reading the singleton directly.
     pub fn export_state(&mut self) -> Result<Value, String> {
+        if !self.has_hook("engine:export-state") {
+            return Ok(self.world_state_json());
+        }
         let val = self
             .app
             .safe_call_function("engine:export-state", vec![], 1000)
@@ -1253,8 +1273,16 @@ impl SchemeLogic {
     }
 
     /// Import world state from JSON value via `(engine:import-state data)`.
+    /// Migrated models implement that hook as `(state:replace! data)`;
+    /// models without the hook write the singleton directly.
     pub fn import_state(&mut self, data: &Value) -> Result<(), String> {
         self.extra_version = self.extra_version.wrapping_add(1);
+        if !self.has_hook("engine:import-state") {
+            if ecs_ffi::set_world_state_json(&mut self.ecs_world.lock(), data) {
+                return Ok(());
+            }
+            return Err("import_state: data must be a JSON object".to_string());
+        }
         let val = json_to_steel_val(data);
         self.app
             .safe_call_function("engine:import-state", vec![val], 1000)
@@ -1262,12 +1290,17 @@ impl SchemeLogic {
         Ok(())
     }
 
-    /// Assemble a snapshot v2 (guide 4.2): the single snapshot boundary
-    /// covering `*world-state*`, the full Flecs world, the PRNG state and
-    /// the authoritative tick (`world_state.tick_count`).
-    pub fn export_snapshot_v2(&mut self) -> Result<Value, String> {
-        let world_state = self.export_state()?;
-        let tick = world_state
+    /// Assemble a snapshot v3: the single snapshot boundary. The top
+    /// level contains ONLY the full Flecs world, the PRNG state and
+    /// the authoritative tick. All model causal state (the former
+    /// Scheme `*world-state*`) lives inside `ecs_world` as the
+    /// DynamicProps of the host-managed `WorldState` singleton
+    /// entity, so there is deliberately NO `world_state` section.
+    /// `tick` is read from that singleton's `tick_count` key (the
+    /// authoritative simulation clock, now ECS-resident).
+    pub fn export_snapshot(&mut self) -> Result<Value, String> {
+        let tick = self
+            .world_state_json()
             .get("tick_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
@@ -1275,7 +1308,7 @@ impl SchemeLogic {
         let prng_state = self.prng_state();
         Ok(serde_json::json!({
             "format": "textcraft-snapshot",
-            "version": 2,
+            "version": 3,
             "model": {
                 "name": self.model_manifest.name,
                 "state_schema": self.model_manifest.state_schema,
@@ -1286,19 +1319,23 @@ impl SchemeLogic {
                 "algo": "xoshiro256++",
                 "state": prng_state,
             },
-            "world_state": world_state,
             "ecs_world": ecs_world,
         }))
     }
 
-    /// Restore a snapshot v2 produced by `export_snapshot_v2` (or by the
-    /// Scheme `checkpoint:save`, which assembles the same shape).
+    /// Restore a snapshot produced by `export_snapshot` (v3), or a
+    /// legacy v2 snapshot (compatibility read: its `world_state`
+    /// section is poured into the ECS world-state singleton on
+    /// import, at negligible cost — one DynamicProps assignment).
+    /// Writing always produces v3.
     ///
-    /// Validation (format / version / model name / state_schema) happens
-    /// before any state is touched. Restore order per guide 4.2:
-    /// ECS -> world_state -> prng -> tick (tick rides inside world_state).
-    /// Returns the entity id_map (identity when ids were preserved).
-    pub fn import_snapshot_v2(
+    /// Validation (format / version / model name / state_schema)
+    /// happens before any state is touched. Restore order:
+    /// ECS (which for v3 includes the state singleton) -> [v2 only:
+    /// world_state into the singleton] -> prng. The tick rides inside
+    /// the singleton's `tick_count` key. Returns the entity id_map
+    /// (identity when ids were preserved).
+    pub fn import_snapshot(
         &mut self,
         data: &Value,
     ) -> Result<std::collections::HashMap<u64, u64>, String> {
@@ -1307,21 +1344,21 @@ impl SchemeLogic {
                 return Err(format!("unsupported snapshot format: {}", fmt));
             }
         }
-        match data.get("version").and_then(|v| v.as_u64()) {
-            Some(2) => {}
+        let version = match data.get("version").and_then(|v| v.as_u64()) {
+            Some(v @ (2 | 3)) => v,
             Some(v) => {
                 return Err(format!(
-                    "unsupported snapshot version: {} (expected 2; v1 checkpoints are not silently compatible)",
+                    "unsupported snapshot version: {} (expected 3, or 2 for compatibility import; v1 checkpoints are not silently compatible)",
                     v
                 ))
             }
             None => {
                 return Err(
-                    "unsupported snapshot version: missing (expected 2; v1 checkpoints are not silently compatible)"
+                    "unsupported snapshot version: missing (expected 3, or 2 for compatibility import; v1 checkpoints are not silently compatible)"
                         .to_string(),
                 )
             }
-        }
+        };
         if let Some(model) = data.get("model") {
             if let Some(name) = model.get("name").and_then(|v| v.as_str()) {
                 if name != self.model_manifest.name {
@@ -1340,20 +1377,27 @@ impl SchemeLogic {
                 }
             }
         }
-        let world_state = data
-            .get("world_state")
-            .cloned()
-            .ok_or_else(|| "snapshot missing 'world_state'".to_string())?;
-        if !world_state.is_object() {
-            return Err("snapshot 'world_state' must be an object".to_string());
-        }
+        // v2 compatibility: the separate world_state section is
+        // required (and validated) only for v2 snapshots.
+        let legacy_world_state: Option<Value> = if version == 2 {
+            let ws = data
+                .get("world_state")
+                .cloned()
+                .ok_or_else(|| "v2 snapshot missing 'world_state'".to_string())?;
+            if !ws.is_object() {
+                return Err("v2 snapshot 'world_state' must be an object".to_string());
+            }
+            Some(ws)
+        } else {
+            None
+        };
         let ecs_data = data
             .get("ecs_world")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({ "entities": [] }));
         // Parse the PRNG state up front so a malformed snapshot fails
-        // before any mutation (guide 4.2: validate in a temp structure,
-        // then switch).
+        // before any mutation (validate in a temp structure, then
+        // switch).
         let prng_parsed: Option<[u64; 4]> = match data.get("prng") {
             None => None,
             Some(p) => {
@@ -1383,33 +1427,45 @@ impl SchemeLogic {
             }
         };
 
-        // 1. ECS (import_world_json validates before clearing).
+        // 1. ECS (import_world_json validates before clearing). For
+        //    v3 this restores the state singleton together with every
+        //    other entity; for v2 the singleton comes back empty and
+        //    step 2 fills it.
         let id_map = self.ecs_world.lock().import_world_json(&ecs_data)?;
         let non_identity = id_map.iter().any(|(a, b)| a != b);
         if non_identity {
             // NOTE: no registered entity-reference fields exist inside
-            // *world-state* (players/monsters use string ids + coords;
+            // model state (players/monsters use string ids + coords;
             // see state_inventory.md), so there is nothing to rewrite.
             tracing::warn!(?id_map, "snapshot import remapped entity ids");
         }
-        // 2. world_state via the model's import hook.
-        self.import_state(&world_state)?;
+        // 2. v2 only: pour the legacy world_state section into the
+        //    ECS singleton (set_world_state_json, NOT the model's
+        //    import hook — the hook's contract is the v3 shape now).
+        if let Some(ws) = &legacy_world_state {
+            ecs_ffi::set_world_state_json(&mut self.ecs_world.lock(), ws);
+        } else {
+            // Guarantee the singleton exists even if a hand-made v3
+            // snapshot omitted it.
+            ecs_ffi::ensure_world_state_entity(&mut self.ecs_world.lock());
+        }
         // 3. PRNG.
         if let Some(st) = prng_parsed {
             self.set_prng_state(st);
         }
-        // 4. tick: carried by world_state.tick_count (authoritative clock).
+        // 4. tick: carried by the singleton's tick_count key
+        //    (authoritative clock, ECS-resident since v3).
         self.increment_extra_version();
         Ok(id_map)
     }
 
     /// Host checkpoint (scope ruling: checkpoints are a HOST feature, not
-    /// model script logic). Stores a snapshot v2 in the MCP blackboard
+    /// model script logic). Stores a snapshot v3 in the MCP blackboard
     /// under the `checkpoint` namespace — the blackboard is only the
     /// storage medium; it is not itself part of the snapshot.
     pub fn create_checkpoint(&mut self, tag: &str) -> Result<String, String> {
         let safe_tag = if tag.trim().is_empty() { "latest" } else { tag.trim() };
-        let snap = self.export_snapshot_v2()?;
+        let snap = self.export_snapshot()?;
         let (ns, sub) = resolve_namespace_and_key(Some("checkpoint"), safe_tag);
         self.mcp_storage
             .write()
@@ -1418,7 +1474,7 @@ impl SchemeLogic {
     }
 
     /// Roll back to a host checkpoint. Returns Ok(false) when the tag does
-    /// not exist; a stored value that is not a snapshot v2 (e.g. a legacy
+    /// not exist; a stored value that is not a textcraft-snapshot (e.g. a legacy
     /// model-local stash) is an explicit version error.
     pub fn rollback_checkpoint(&mut self, tag: &str) -> Result<bool, String> {
         let safe_tag = if tag.trim().is_empty() { "latest" } else { tag.trim() };
@@ -1433,22 +1489,22 @@ impl SchemeLogic {
         };
         if snap.get("format").and_then(|v| v.as_str()) != Some("textcraft-snapshot") {
             return Err(
-                "unsupported checkpoint version: stored value is not a textcraft-snapshot v2"
+                "unsupported checkpoint version: stored value is not a textcraft-snapshot (v3, or v2 for compatibility import)"
                     .to_string(),
             );
         }
-        self.import_snapshot_v2(&snap)?;
+        self.import_snapshot(&snap)?;
         Ok(true)
     }
 
-    /// State hash (guide 4.4): SHA-256 of the canonical snapshot v2 JSON.
+    /// State hash (guide 4.4): SHA-256 of the canonical snapshot v3 JSON.
     pub fn state_hash(&mut self) -> Result<String, String> {
-        let snap = self.export_snapshot_v2()?;
+        let snap = self.export_snapshot()?;
         Ok(snapshot::hash_json(&snap))
     }
 
     /// Atomically save world state to disk using `.tmp` and rename.
-    /// Save files use the snapshot v2 format (guide item 2.4).
+    /// Save files use the snapshot v3 format.
     pub fn save_state_to_file(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let save_path = match &self.save_file {
             Some(p) => p.clone(),
@@ -1456,7 +1512,7 @@ impl SchemeLogic {
         };
 
         let state = self
-            .export_snapshot_v2()
+            .export_snapshot()
             .map_err(std::io::Error::other)?;
 
         if let Some(parent) = save_path.parent() {
@@ -1495,8 +1551,8 @@ impl SchemeLogic {
         let content = std::fs::read_to_string(&save_path)?;
         let json: Value = serde_json::from_str(&content)?;
         if json.get("format").and_then(|v| v.as_str()) == Some("textcraft-snapshot") {
-            // Snapshot v2 save file.
-            self.import_snapshot_v2(&json)
+            // Snapshot save file (v3; v2 accepted on import).
+            self.import_snapshot(&json)
                 .map_err(std::io::Error::other)?;
         } else {
             // Legacy v1 save file: bare *world-state* JSON (world_state only).
@@ -1536,6 +1592,19 @@ impl SchemeLogic {
             let code = std::fs::read_to_string(&file)
                 .map_err(|e| format!("Failed to read {}: {}", file.display(), e))?;
             sources.push((file, code));
+        }
+
+        if clean {
+            // Snapshot v3 state-reset semantics: pre-v3, recompiling
+            // the prelude re-`define`d *world-state* to its initial
+            // hash, which is what made a clean reload fresh. The ECS
+            // singleton has no equivalent implicit reset, and the
+            // models' (state:seed-defaults! ...) only fills missing
+            // keys — so wipe the singleton BEFORE recompiling, letting
+            // the prelude's seed re-fill the defaults exactly as the
+            // old define did. On compile failure the exported state
+            // above is restored by the error paths below.
+            ecs_ffi::set_world_state_json(&mut self.ecs_world.lock(), &serde_json::json!({}));
         }
 
         for (file, code) in sources {

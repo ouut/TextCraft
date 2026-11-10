@@ -1,4 +1,4 @@
-//! Snapshot v2 support: model manifest, canonical serialization, host-side
+//! Snapshot support: model manifest, canonical serialization, host-side
 //! assertions (guide items 4 & 7; snapshot assembly lives in `SchemeLogic`).
 
 use serde_json::Value;

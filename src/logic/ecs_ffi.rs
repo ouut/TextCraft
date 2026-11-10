@@ -1,3 +1,4 @@
+use flecs_ecs::prelude::*;
 use std::sync::Arc;
 use parking_lot::Mutex;
 use steel::gc::Gc;
@@ -6,9 +7,110 @@ use steel::steel_vm::engine::Engine;
 use steel::steel_vm::register_fn::RegisterFn;
 use game_script::{json_to_steel_val, steel_val_to_json};
 
-use crate::ecs::components::Color;
+use crate::ecs::components::{Color, DynamicProps};
 use crate::ecs::rasterizer::ViewportRasterizer;
 use crate::ecs::world::EcsWorld;
+
+/// Name of the host-managed singleton entity that is the SINGLE
+/// authoritative store for all model causal state (snapshot v3: the
+/// former Scheme `*world-state*` hash). Every top-level state key is
+/// one entry of this entity's `DynamicProps`, so the existing
+/// `export_world_json` / `import_world_json` path serializes the whole
+/// model state with the rest of the Flecs world — there is no second
+/// store and no separate `world_state` snapshot section any more.
+pub const WORLD_STATE_ENTITY_NAME: &str = "WorldState";
+
+/// Look up (creating on first use) the world-state singleton entity
+/// and guarantee it carries a (possibly empty) `DynamicProps`
+/// component. `spawn_named` is idempotent by name in Flecs, so this
+/// is cheap and safe to call on every state access; after a world
+/// clear / snapshot import it simply re-resolves the entity.
+pub fn ensure_world_state_entity(ecs: &mut EcsWorld) -> u64 {
+    let id = ecs.spawn_named(WORLD_STATE_ENTITY_NAME);
+    let has_props = ecs
+        .world
+        .entity_from_id(id)
+        .try_get::<&DynamicProps>(|_| ())
+        .is_some();
+    if !has_props {
+        ecs.world.entity_from_id(id).set(DynamicProps::default());
+    }
+    id
+}
+
+// Singleton accessors that do NOT go through `EcsWorld::get_prop` /
+// `set_prop`: those clone the entity's whole `DynamicProps`, which
+// for the world-state singleton means deep-cloning the ENTIRE model
+// state on every single key access (measured: a plain on-tick went
+// from 0.26 ms pre-migration to ~16 ms). `try_get` with `&` / `&mut`
+// component references touches only the requested key's value.
+
+fn ws_get(ecs: &EcsWorld, id: u64, key: &str) -> Option<serde_json::Value> {
+    ecs.world
+        .entity_from_id(id)
+        .try_get::<&DynamicProps>(|p| p.get(key).cloned())
+        .flatten()
+}
+
+fn ws_has(ecs: &EcsWorld, id: u64, key: &str) -> bool {
+    ecs.world
+        .entity_from_id(id)
+        .try_get::<&DynamicProps>(|p| p.has(key))
+        .unwrap_or(false)
+}
+
+fn ws_set(ecs: &mut EcsWorld, id: u64, key: &str, val: serde_json::Value) -> bool {
+    let done = ecs
+        .world
+        .entity_from_id(id)
+        .try_get::<&mut DynamicProps>(|p| p.set(key.to_string(), val.clone()))
+        .is_some();
+    if done {
+        return true;
+    }
+    let mut props = DynamicProps::new();
+    props.set(key.to_string(), val);
+    ecs.world.entity_from_id(id).set(props);
+    true
+}
+
+fn ws_remove(ecs: &mut EcsWorld, id: u64, key: &str) -> bool {
+    ecs.world
+        .entity_from_id(id)
+        .try_get::<&mut DynamicProps>(|p| p.remove(key).is_some())
+        .unwrap_or(false)
+}
+
+/// All world-state key/value pairs as a JSON object (empty object when
+/// the singleton carries no keys yet). Wholesale by definition — used
+/// by export paths, not by per-key access.
+pub fn world_state_json(ecs: &mut EcsWorld) -> serde_json::Value {
+    let id = ensure_world_state_entity(ecs);
+    match ecs
+        .world
+        .entity_from_id(id)
+        .try_get::<&DynamicProps>(|p| {
+            serde_json::Value::Object(p.values.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        }) {
+        Some(v) => v,
+        None => serde_json::json!({}),
+    }
+}
+
+/// Replace the whole world-state contents with `data` (must be a JSON
+/// object). Returns false (leaving state untouched) for non-objects.
+pub fn set_world_state_json(ecs: &mut EcsWorld, data: &serde_json::Value) -> bool {
+    let Some(map) = data.as_object() else {
+        return false;
+    };
+    let id = ensure_world_state_entity(ecs);
+    let mut props = DynamicProps::new();
+    for (k, v) in map {
+        props.set(k.clone(), v.clone());
+    }
+    ecs.world.entity_from_id(id).set(props);
+    true
+}
 
 fn steel_to_string(v: &SteelVal) -> String {
     match v {
@@ -423,8 +525,153 @@ pub fn register_ecs_primitives(
 
     let e_clear = Arc::clone(&ecs);
     engine.register_fn("ecs:clear!", move || -> bool {
-        e_clear.lock().clear();
+        // The world-state singleton is NOT a game entity: clearing the
+        // ECS world (e.g. the roguelike's `world:clear!` on init) must
+        // not destroy the model's causal state, which used to live in
+        // the separate *world-state* hash and survived tile clearing.
+        // Capture its props, clear, and restore them on the recreated
+        // singleton. (Snapshot import does NOT go through here — it
+        // uses `EcsWorld::clear` directly and restores the singleton
+        // from the snapshot's entity list.)
+        let mut guard = e_clear.lock();
+        let saved = {
+            let id = guard.spawn_named(WORLD_STATE_ENTITY_NAME);
+            guard
+                .inspect_entity(id)
+                .and_then(|v| v["dynamic_props"].as_object().cloned())
+        };
+        guard.clear();
+        if let Some(map) = saved {
+            let obj = serde_json::Value::Object(map);
+            set_world_state_json(&mut guard, &obj);
+        }
         true
+    });
+
+    // ------------------------------------------------------------------------
+    // 5b. World-state facade (`state:*`): the ONLY way model scripts
+    // read/write model causal state (snapshot v3). All operations go
+    // to the DynamicProps of the host-managed `WorldState` singleton
+    // entity, so state automatically rides along with ECS snapshots.
+    // Value conversion is the standard steel<->JSON interop used by
+    // `ecs:set`/`ecs:get`: ints stay ints, floats stay floats (0.0
+    // round-trips as a float), bools/strings/nested hashes/lists are
+    // preserved; chars and symbols degrade to strings (as with
+    // `ecs:set`), and closures cannot be stored at all — causal state
+    // must be pure data, exactly as *world-state* required.
+    // ------------------------------------------------------------------------
+    let s1 = Arc::clone(&ecs);
+    engine.register_fn("__state:get", move |key: SteelVal| -> SteelVal {
+        let k = steel_to_string(&key);
+        let mut guard = s1.lock();
+        let id = ensure_world_state_entity(&mut guard);
+        match ws_get(&guard, id, &k) {
+            Some(json) => json_to_steel_val(&json),
+            None => SteelVal::BoolV(false),
+        }
+    });
+
+    let s2 = Arc::clone(&ecs);
+    engine.register_fn(
+        "__state:get-default",
+        move |key: SteelVal, default: SteelVal| -> SteelVal {
+            let k = steel_to_string(&key);
+            let mut guard = s2.lock();
+            let id = ensure_world_state_entity(&mut guard);
+            match ws_get(&guard, id, &k) {
+                Some(json) => json_to_steel_val(&json),
+                None => default,
+            }
+        },
+    );
+
+    let s3 = Arc::clone(&ecs);
+    engine.register_fn(
+        "state:set!",
+        move |key: SteelVal, val: SteelVal| -> bool {
+            let k = steel_to_string(&key);
+            let json = match steel_val_to_json(&val) {
+                Ok(j) => j,
+                Err(_) => return false,
+            };
+            let mut guard = s3.lock();
+            let id = ensure_world_state_entity(&mut guard);
+            ws_set(&mut guard, id, &k, json)
+        },
+    );
+
+    let s4 = Arc::clone(&ecs);
+    engine.register_fn("state:has?", move |key: SteelVal| -> bool {
+        let k = steel_to_string(&key);
+        let mut guard = s4.lock();
+        let id = ensure_world_state_entity(&mut guard);
+        ws_has(&guard, id, &k)
+    });
+
+    let s5 = Arc::clone(&ecs);
+    engine.register_fn("state:remove!", move |key: SteelVal| -> bool {
+        let k = steel_to_string(&key);
+        let mut guard = s5.lock();
+        let id = ensure_world_state_entity(&mut guard);
+        ws_remove(&mut guard, id, &k)
+    });
+
+    let s6 = Arc::clone(&ecs);
+    engine.register_fn("state:all", move || -> SteelVal {
+        let mut guard = s6.lock();
+        json_to_steel_val(&world_state_json(&mut guard))
+    });
+
+    let s7 = Arc::clone(&ecs);
+    engine.register_fn("state:replace!", move |data: SteelVal| -> bool {
+        let json = match steel_val_to_json(&data) {
+            Ok(j) => j,
+            Err(_) => return false,
+        };
+        let mut guard = s7.lock();
+        set_world_state_json(&mut guard, &json)
+    });
+
+    let s8 = Arc::clone(&ecs);
+    engine.register_fn("state:seed-defaults!", move |data: SteelVal| -> bool {
+        // Fill in only MISSING keys from the given hash — used by a
+        // model's prelude at load time to declare its initial state
+        // without wiping live state on hot reload.
+        let json = match steel_val_to_json(&data) {
+            Ok(j) => j,
+            Err(_) => return false,
+        };
+        let Some(map) = json.as_object() else {
+            return false;
+        };
+        let mut guard = s8.lock();
+        let id = ensure_world_state_entity(&mut guard);
+        for (k, v) in map {
+            if !ws_has(&guard, id, k) {
+                ws_set(&mut guard, id, k, v.clone());
+            }
+        }
+        true
+    });
+
+    let s_keys = Arc::clone(&ecs);
+    engine.register_fn("state:keys", move || -> SteelVal {
+        let mut guard = s_keys.lock();
+        let all = world_state_json(&mut guard);
+        let keys: Vec<SteelVal> = match all.as_object() {
+            Some(map) => map
+                .keys()
+                .map(|k| SteelVal::StringV(k.as_str().into()))
+                .collect(),
+            None => Vec::new(),
+        };
+        SteelVal::ListV(keys.into())
+    });
+
+    let s9 = Arc::clone(&ecs);
+    engine.register_fn("state:entity-id", move || -> isize {
+        let mut guard = s9.lock();
+        ensure_world_state_entity(&mut guard) as isize
     });
 
     let e_inspect = Arc::clone(&ecs);
@@ -593,6 +840,11 @@ pub fn register_ecs_primitives(
       (case-lambda
         ((eid key) (__ecs:get eid key))
         ((eid key default) (__ecs:get-default eid key default))))
+
+    (define state:get
+      (case-lambda
+        ((key) (__state:get key))
+        ((key default) (__state:get-default key default))))
 
     (define ecs:at
       (case-lambda

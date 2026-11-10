@@ -1280,7 +1280,7 @@ impl TextCraftServer {
             }),
             serde_json::json!({
                 "name": "reload_scripts",
-                "description": "Force immediate hot-reload of all Scheme (.scm) scripts in scripts/. If clean is true (default), re-initializes world state via (engine:on-init); if false, preserves existing *world-state*.",
+                "description": "Force immediate hot-reload of all Scheme (.scm) scripts in scripts/. If clean is true (default), re-initializes world state via (engine:on-init); if false, preserves existing world state.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1770,7 +1770,7 @@ impl TextCraftServer {
             }),
             serde_json::json!({
                 "name": "state_hash",
-                "description": "Return the SHA-256 state hash of the current snapshot v2 (canonical serialization).",
+                "description": "Return the SHA-256 state hash of the current snapshot v3 (canonical serialization).",
                 "inputSchema": { "type": "object", "properties": {} }
             }),
             serde_json::json!({
@@ -1790,7 +1790,7 @@ impl TextCraftServer {
             }),
             serde_json::json!({
                 "name": "create_checkpoint",
-                "description": "HOST snapshot v2 checkpoint: capture full causal state (world_state + ECS world + PRNG + tick) under a tag in the checkpoint namespace.",
+                "description": "HOST snapshot v3 checkpoint: capture full causal state (ECS world incl. the WorldState singleton + PRNG + tick) under a tag in the checkpoint namespace.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1800,7 +1800,7 @@ impl TextCraftServer {
             }),
             serde_json::json!({
                 "name": "rollback_checkpoint",
-                "description": "HOST snapshot v2 rollback: restore a checkpoint created by create_checkpoint. Legacy non-v2 stored values are rejected with a version error.",
+                "description": "HOST snapshot v3 rollback: restore a checkpoint created by create_checkpoint (v2 snapshots are accepted on import). Legacy non-snapshot stored values are rejected with a version error.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -2628,7 +2628,7 @@ impl TextCraftServer {
                             "success": true,
                             "tag": saved_tag,
                             "namespace": "checkpoint",
-                            "message": format!("Checkpoint '{}' saved (snapshot v2, host)", saved_tag)
+                            "message": format!("Checkpoint '{}' saved (snapshot v3, host)", saved_tag)
                         });
                         (serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()), false)
                     }

@@ -43,14 +43,14 @@ fn test_rollback_replay_converges() {
     logic.init().unwrap();
     logic.set_random_seed(Some(7));
     let _ = draw_seq(&mut logic, 10);
-    let snap = logic.export_snapshot_v2().unwrap();
+    let snap = logic.export_snapshot().unwrap();
     let uninterrupted = draw_seq(&mut logic, 20);
-    let state_after = logic.export_snapshot_v2().unwrap();
+    let state_after = logic.export_snapshot().unwrap();
 
-    logic.import_snapshot_v2(&snap).unwrap();
+    logic.import_snapshot(&snap).unwrap();
     let replayed = draw_seq(&mut logic, 20);
     assert_eq!(uninterrupted, replayed, "replay after rollback must match");
-    let state_replayed = logic.export_snapshot_v2().unwrap();
+    let state_replayed = logic.export_snapshot().unwrap();
     assert_eq!(state_after, state_replayed, "states converge after replay");
 }
 

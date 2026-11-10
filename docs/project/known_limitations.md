@@ -6,36 +6,30 @@
 
 ---
 
-## (a) 双存储并集与同步约定：`*world-state*` ＋ Flecs 世界
+## (a) 双存储并集与同步约定：`*world-state*` ＋ Flecs 世界 —— 【已解决 · 第二轮改造（2026-11-10）】
 
-**现状**
-同一份世界状态物理上存两处：模型侧的 Scheme 全局 `*world-state*`（经 `engine:export-state` / `engine:import-state` 进出快照的 `world_state` 字段），与宿主侧的 Flecs 世界（`src/ecs/world.rs` 的 `EcsWorld`，含 `GridPos` / `VisualGlyph` / `PlayerSession` / `DynamicProps` 四个组件、实体标签与 `PartOf` / `EquippedOn` / `CoveredWith` 关系，进快照的 `ecs_world.entities[]` 字段）。快照 v2 覆盖的是这个**并集**（外加 PRNG 状态与顶层 `tick`，见 state_inventory 第 2 节）。两处之间没有自动同步机制：单一权威靠 state_inventory 的登记规则维持——新增任何状态必须先登记所有者、物理位置与快照字段。经核查，当前示例模型的 `*world-state*` 内**不保存** Flecs 实体 id（玩家/怪物以字符串 id ＋坐标与 ECS 关联），所以快照导入用 `make_alive` 保 id 时模型侧无需重写引用；但若某模型把实体 id 存进 `DynamicProps`，必须先在 state_inventory 登记该键名，基座才会据此处理——目前无此用法。
+**解决形态**
+Flecs 世界已成为唯一权威存储。宿主在 `SchemeLogic::new` 时急切创建单例实体 `WorldState`（Flecs 首个 spawn，id 固定 518），原 `*world-state*` 的全部因果状态（地图、玩家表、`tick_count` 等）以顶层键为单位存入该实体的 `DynamicProps`（JSON 键值）；roguelike 的地图按 chunk 分键（`chunk:<cx>,<cy>`）避免整图深转换，旧单键 `chunks` 由 prelude 首触时无损拆分迁移。Scheme 侧只保留兼容门面：宿主原语 `state:get` / `state:set!` / `state:has?` / `state:remove!` / `state:all` / `state:replace!` / `state:seed-defaults!` / `state:keys` / `state:entity-id`（`src/logic/ecs_ffi.rs`），仓库内模型（roguelike、counter_economy）已全部迁移到门面，代码中对 `*world-state*` 的直接读写为零（仅剩注释提及）；直接 `(set! *world-state* ...)` 的旧写法就此废弃，新模型不得再用。`tick_count` 的权威随状态迁入单例（ECS 侧），快照顶层 `tick` 从单例读，`server_tick` 仍只是传输层计数。快照升 **v3**：顶层只含 Flecs 世界＋PRNG＋时钟，不再有独立的 `world_state` 段，checkpoint / `run_epoch` / `state_hash` 全走新路径；v2 旧存档可兼容读取（导入时把其 `world_state` 段一次灌入单例），写出永远是 v3。验收见 `tests/snapshot_v3_test.rs`（仅经门面改状态→快照→清空整个 ECS→恢复→哈希一致，且断言顶层无 `world_state` 段）。
 
-**影响**
-同一个事实若被模型同时写进两边，两份副本的更新顺序与一致性完全由模型代码自守，基座不校验、不报警。快照能忠实保存并集在拍摄时刻的样子、状态哈希也能对上，但两边语义已经分叉的世界照样能通过哈希与往返测试，问题只会在后续演化中暴露。
-
-**触发条件**
-新模型（或现有模型扩展）对同一事实双写：例如位置既存 `*world-state*` 的实体表、又用 `ecs:set-pos` 写 `GridPos`，且两条写路径不是每次都成对执行；或模型开始把 Flecs 实体 id 落进 `*world-state*` / `DynamicProps` 却未在 state_inventory 登记。
+**遗留子项（未随本条关闭）**
+① `state:get` 读取大值（整个 chunk）仍有 JSON 克隆＋Scheme↔JSON 转换成本：roguelike 的 tick30 基准约 38ms（旧基线约 2ms），在 500ms 看门狗内但余量变薄；若后续要再压性能，需把 tiles 改为实体级存储，属下一轮议题。② Scheme 的 char/symbol 值经门面往返会降为 string（与既有 `ecs:set` 同口径）；现已核查两个模型的状态值无 char/symbol/闭包，无实际漂移点，新模型往单例里存这类值前需先意识到这一点。
 
 ---
 
-## (b) 通用性实证只有一个，且它没用 ECS
+## (b) 通用性实证只有一个，且它没用 ECS —— 【已解决 · 第二轮改造（2026-11-10）】
 
-**现状**
-「基座能跑非网格模型」目前只有一个实证：夹具模型 `tests/fixtures/models/counter_economy/`（双账户计息/转账的经济模拟），由 `tests/epoch_fixture_test.rs` 验证其在同一二进制上跑通完整 epoch 且结果确定。该夹具的 `main.scm` 明确**不调用任何 `ecs:*`**、不用 `GridPos` / 字形 / 视口，全部状态只放在它自己的 `*world-state*` 里。与此同时，网格组件并未从宿主拆出：`EcsWorld::new`（`src/ecs/world.rs`）仍无条件注册 `GridPos`、`VisualGlyph` 等组件，scheme_developer_guide 第 7 节也注明核心/网格原语的划分「只做契约/装载层分类，不改变 `src/ecs/` 的组件注册；网格组件仍在基座内注册，非网格模型不使用它们」。快照的「游戏实体」判据已在本轮放宽（A 组任务 1）：携带任何组件、标签、关系或名字的游戏实体都进快照，纯标签/纯关系实体可往返（有专门测试）；flecs 基础设施实体（组件/标签/关系定义实体、flecs 命名空间）被排除。但仍有两点残留：① 导出只对四个已知组件（GridPos/VisualGlyph/DynamicProps/PlayerSession）序列化**值**，实体上未知的 Rust 组件只在 `unknown_components` 字段列出名字、值不进快照（不再静默丢失，但也不完整）；② 动态标签/关系定义实体若已被移除全部引用，与同名 spawn 实体结构上不可区分，可能被当作命名实体导出。
+**解决形态**
+新增真正使用 ECS 的非网格实证模型 `tests/fixtures/models/market_sim/`（市场模拟：账户/商户/库存/订单实体，Balance/Inventory 类数据全经 `ecs:set`/`ecs:get` 写读 `DynamicProps`，`Owns` / `TradesWith` / `PlacedBy` / `FilledBy` / `PartOf` 关系走通用原语 `ecs:relate`，另有 Market/Account/Merchant/Stock/Order 等标签；全程不引用 `*world-state*`、不用 `GridPos`/`SpatialGrid`/任何网格算子）。`tests/market_sim_test.rs` 三个测试背书：① `run_epoch` 固定种子＋输入序列，终局余额/库存/till/成交数由宿主断言精确校验且重跑报告逐字节一致；② 快照→回滚→续跑后 `state_hash` 与导出状态与第一程完全一致，恢复后关系对与标签经 `ecs:target`/`ecs:children`/`ecs:has-tag?` 与快照 JSON 双路断言完整；③ 非网格把关：测试对模型源码 grep 指南 7.2 网格 token 清单（含 `world-state`）断言零出现、反向断言 `ecs:*` 核心原语确有调用，并断言快照中每个实体 `position` 为 null。此前「不用 ECS 的非网格模型」（counter_economy）与「用 ECS 的非网格模型」（market_sim）两条路径至此都有端到端实证。
 
-**影响**
-「用 ECS 的非网格模型」这条路径仍未被完整验证过：例如一个只用 `DynamicProps` ＋标签/关系建模、不用网格坐标的模型，其实体创建与 epoch 评测是否全程成立，没有端到端测试背书；若模型引入宿主未知的 Rust 组件类型，其值会因上条残留 ① 而不在快照内。当前能声称的通用性上限是「不用 ECS 的非网格模型可跑、已知组件构成的 ECS 状态可往返」，不能外推为「任意 ECS 模型可跑」。
-
-**触发条件**
-新模型选型时使用 ECS 容器原语（`ecs:spawn`、`ecs:set` 写 `DynamicProps`、标签、关系等）但不使用网格原语，或模型中出现不带任何核心组件的实体。
+**遗留子项（未随本条关闭）**
+① 导出只对已知组件（GridPos/VisualGlyph/DynamicProps/PlayerSession）序列化**值**：实体上未知的 Rust 组件只在 `unknown_components` 字段列出名字、值不进快照（不静默丢失，但不完整）；模型引入宿主未知组件类型前须先给导出加序列化支持。② 动态标签/关系定义实体若已被移除全部引用，与同名 spawn 实体结构上不可区分，可能被当作命名实体导出。③ **回滚后新 spawn 实体 id 不续号**：快照导入用 `make_alive` 保持已有实体 id，但 Flecs 分配器不从 checkpoint 时的计数续号，回滚后新生成的实体会拿到更大的 id；而 `state_hash` 覆盖 ecs_world 原始 id，这类「回滚后继续 spawn」的模型续跑哈希会与不间断运行发散（因果状态本身逐值一致）。market_sim 的应对是订单实体改为 init 时生成的有界槽位池、交易复用改写；若后续模型需要「回滚后 spawn 仍哈希一致」，须在基座层处理（如哈希口径排除纯分配器 id、或导入时回退分配器计数），属待决问题。
 
 ---
 
 ## (c) live 模式墙钟 dt：确定性只覆盖无头路径
 
 **现状**
-实时服务循环（`src/runtime.rs` 的 `run_loop`）的 dt 取真实流逝时间：`let dt = elapsed.as_secs_f32() * self.time_scale;`，其中 `elapsed` 是两帧之间 `Instant` 的差，随后经 `tick(dt)` → `engine:on-tick dt tick-id` 传给模型。模型会把这个浮点 dt 累加进状态——如示例模型把 dt 累加到 `*world-state*` 的 `elapsed_sec` 与 `idle_timer`（均为快照 `world_state` 字段内的因果状态）。相对地，确定性路径不取墙钟：`run_epoch` 的 dt 来自参数（缺省 0.016），`simulate_steps` 以调用方给定的固定 dt 无睡眠步进。因此现有的种子化 PRNG、状态哈希与 epoch 可复现保证，口径上只覆盖 `run_epoch` / 无头步进路径，不覆盖 live 模式。
+实时服务循环（`src/runtime.rs` 的 `run_loop`）的 dt 取真实流逝时间：`let dt = elapsed.as_secs_f32() * self.time_scale;`，其中 `elapsed` 是两帧之间 `Instant` 的差，随后经 `tick(dt)` → `engine:on-tick dt tick-id` 传给模型。模型会把这个浮点 dt 累加进状态——如示例模型把 dt 累加到 WorldState 单例里的 `elapsed_sec` 与 `idle_timer`（均为快照内的因果状态）。相对地，确定性路径不取墙钟：`run_epoch` 的 dt 来自参数（缺省 0.016），`simulate_steps` 以调用方给定的固定 dt 无睡眠步进。因此现有的种子化 PRNG、状态哈希与 epoch 可复现保证，口径上只覆盖 `run_epoch` / 无头步进路径，不覆盖 live 模式。
 
 **影响**
 live 模式下同一局游戏无法按「种子＋输入序列」复现：帧率抖动、机器负载、暂停时长都会改变 dt，进而改变 `elapsed_sec` 等浮点状态与依赖它们的演化（乃至快照哈希）。live 过程中拍摄的快照恢复后继续跑，也不会与不间断运行收敛到同一状态——这不是 bug，是当前 dt 来源决定的。
