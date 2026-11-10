@@ -1,0 +1,89 @@
+name: Tests
+
+# 与 release.yml 分工：release.yml 只在 main / tag 时做发布构建，
+# 本 workflow 负责开发分支与 PR 的测试门禁。
+on:
+  push:
+    branches:
+      - feat/simulator-upgrade
+      - v5.0
+  pull_request:
+    branches:
+      - feat/simulator-upgrade
+      - v5.0
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: cargo test (--locked)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 与 release.yml 保持同一套工具链安装方式（dtolnay/rust-toolchain）。
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      # ------------------------------------------------------------------
+      # 为什么拆成两步、且第一步要逐个 --test 列举：
+      #
+      # 已知基线在册一条「稳定失败」：
+      #   tests/phase5_scale_benchmark.rs 的
+      #   test_10000_entities_scale_and_rasterizer_benchmark
+      #   断言光栅化 ≤ 200μs/帧。该预算对 runner 速度敏感：慢速共享 VM
+      #   实测 697–827μs（见 docs/project/baseline_v5_test_results.md），
+      #   属环境问题、非功能回归，但它会让全量 cargo test 永远红灯。
+      #
+      # 本仓库是单包项目（Cargo.toml 只有一个 [package]，非 workspace），
+      # `cargo test --exclude` 只对 workspace 成员包有效，对单个测试套件
+      # 无效，无法用它把该套件排除出必过集合。因此第一步逐个 --test
+      # 列举 tests/ 下除 phase5_scale_benchmark 外的全部套件（另加 --lib
+      # 覆盖库内单元测试），这一组必须全过；第二步单独跑该套件并标
+      # continue-on-error，只记录结果、不挡门禁。
+      #
+      # 注意：新增 tests/*.rs 套件时，必须把名字补进下面的列表，
+      # 否则它不会在 CI 里被运行（phase5_scale_benchmark 除外）。
+      # ------------------------------------------------------------------
+      - name: Test suite (must pass)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --no-fail-fast --lib
+          for suite in \
+            advanced_mcp_features_test \
+            ecs_ffi_test \
+            epoch_fixture_test \
+            epoch_test \
+            eval_mode_test \
+            graceful_scheme_hooks_test \
+            headless_simulation_test \
+            integration_tests \
+            manifest_test \
+            mcp_storage_test \
+            phase4_emergence_test \
+            phase5_verification_test \
+            prng_test \
+            rasterizer_benchmark \
+            server_gateway_test \
+            snapshot_dedup_test \
+            snapshot_v2_test
+          do
+            echo "::group::cargo test --test ${suite}"
+            cargo test --locked --no-fail-fast --test "${suite}"
+            echo "::endgroup::"
+          done
+
+      # 性能套件单独跑：结果只作记录。红了先对照
+      # docs/project/baseline_v5_test_results.md 与
+      # docs/project/known_limitations.md (d) 判断是 runner 速度问题
+      # 还是真实性能回归，不要直接改预算了事。
+      - name: Performance benchmark suite (known baseline failure, non-blocking)
+        continue-on-error: true
+        run: cargo test --locked --no-fail-fast --test phase5_scale_benchmark
