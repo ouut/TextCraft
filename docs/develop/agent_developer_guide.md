@@ -1,5 +1,7 @@
 # TextCraft 5.0: 游戏与前端 HUD 开发者综合指南 (Agent Developer Guide)
 
+> **当前分支状态（feat/simulator-upgrade，2026-11-10 基座改造后）**：本指南已按改造后的代码更新。关键变化：模型脚本位于模型目录（`--scripts-dir`，默认 `models/roguelike/`，不再是 `scripts/`）；模型状态的唯一权威是 Flecs ECS——原 `*world-state*` 已消灭，其键迁入宿主单例实体 `WorldState`，脚本一律经 `state:*` 门面原语读写（见 2.3）；快照为 v3（宿主实现，含 ECS 世界＋PRNG＋tick），评测走 `run_epoch`＋宿主侧断言，另有 `--eval` 评测模式（见 `mcp_developer_guide.md`）。基座状态全集以 `docs/project/state_inventory.md` 为准，已知限制见 `docs/project/known_limitations.md`。
+
 > [!IMPORTANT]
 > **致阅读本指南的开发者与智能体（Agent）**：
 > TextCraft 5.0 采用 **“Flecs ECS 权威底座 + 原生 ANSI 光栅化 + 密集数学算子 (Rust) + 纯 Scheme 动态业务逻辑 (Steel) + Agent 自动驾驶与无头推演 + 极简 Web 终端底座 + 单进程 MCP AI 管道”** 架构：
@@ -33,14 +35,14 @@ flowchart TD
         MCP["MCP JSON-RPC 2.0 服务端 (:8082)"]
     end
 
-    subgraph Scheme["Scheme 游戏核心 (scripts/)"]
+    subgraph Scheme["Scheme 游戏核心 (models/roguelike/)"]
         Prelude["prelude.scm (宏生态 / ECS DSL / MCP 注册表)"]
         Anatomy["anatomy.scm (肢体树 / 装备 / 暴击断肢)"]
         Chemistry["chemistry.scm (液体池 / 热力学 / 酸蚀相变)"]
         Mutation["mutation.scm (变异 / 技能冷却 / 属性修正)"]
         WorldGen["worldgen.scm (洞窟 / 盐沼 / 生态种群)"]
         Main["main.scm (回合主循环 / 协议响应 / 钩子)"]
-        State[("*world-state*<br>纯数据动态状态树")]
+        State[("WorldState 单例实体 (ECS)<br>state:* 门面读写")]
     end
 
     CustomHUD & Wakeup -->|调用| SDK
@@ -55,17 +57,17 @@ flowchart TD
 ### 四大核心开发准则
 
 1. **Flecs 权威物理底座 vs 动态玩法规则（Authoritative ECS vs Dynamic Rules）**：
-   实体的空间坐标（`GridPos`）、外观图元（`VisualGlyph`）、层级结构（`PartOf`）、装备挂载（`EquippedOn`）与会话绑定（`PlayerSession`）常驻 Flecs ECS 权威内存，由 Rust 维护极速空间哈希与原生光栅化；游戏剧本、任务状态与 HUD 则保存在 Scheme 纯数据字典中。
+   实体的空间坐标（`GridPos`）、外观图元（`VisualGlyph`）、层级结构（`PartOf`）、装备挂载（`EquippedOn`）与会话绑定（`PlayerSession`）常驻 Flecs ECS 权威内存，由 Rust 维护极速空间哈希与原生光栅化；游戏剧本与任务状态同样只存一份——在 ECS 内的宿主单例实体 `WorldState` 里，Scheme 经 `state:*` 门面原语读写（不再有独立的 Scheme 侧状态树）；HUD 数据由 Scheme 按帧组装返回。
 2. **脏版本标记与微秒级短路（Dirty Version Tracking）**：
    引擎内置 `*visual-version*` 计数器与玩家专属脏标记。任何移动、变异、状态变迁或通过 `(ecs:set-pos ...)` 变更图元的操作都会自动标记脏状态。在静止帧或未达到保活周期时，宿主直接跳过全量快照推流，单帧开销 `< 0.05ms`。
 3. **四图层与原生 ANSI RLE 光栅化（Sub-5μs Rasterizer）**：
    世界分为 4 个物理图层：`0: LAYER-TERRAIN`、`1: LAYER-SURFACE`、`2: LAYER-ACTOR`、`3: LAYER-OVERLAY`。Rust 底层 `ViewportRasterizer` 状态机直接在 4.53 μs 内完成多层重叠覆盖与 ANSI 行颜色状态合并压缩，网络带宽减少 95%。
 4. **前后端纯数据契约与 Agent 自动推演（Pure JSON HUD & MCP Self-Driving）**：
-   Scheme 在 `(engine:render-snapshot pid)` 中返回的 `"hud"` 字典被序列化为 JSON 推给前端；前端通过 `TextCraft.sendAction` 触发 Scheme 响应。AI Agent 则可通过 MCP 无头推演接口 (`sim_step`, `state_diff`, `assert_state`) 在虚拟时钟下自动验证数千步游戏逻辑。
+   Scheme 在 `(engine:render-snapshot pid)` 中返回的 `"hud"` 字典被序列化为 JSON 推给前端；前端通过 `TextCraft.sendAction` 触发 Scheme 响应。AI Agent 则可通过 MCP 无头推演接口 (`sim_step`, `state_diff`) 在虚拟时钟下推进与比对状态；正式评测走宿主工具 `run_epoch`（固定种子＋输入序列＋宿主侧断言 `{path, op, expected}`，在被评测 VM 之外求值），`assert_state` 仅保留为 dev 模式调试工具，eval 模式下被门禁。
 
 ---
 
-## 第二部分：Scheme 游戏逻辑开发指南 (`scripts/`)
+## 第二部分：Scheme 游戏逻辑开发指南（模型目录，默认 `models/roguelike/`）
 
 ### 2.1 Steel Scheme 常用语法速查
 
@@ -113,35 +115,52 @@ Steel 中的哈希表是不可变持久化数据结构（`hash-insert` 与 `hash
 
 ### 2.2 Rust 宿主注入函数 (Host Functions)
 
-Rust 宿主在 Scheme 全局环境中注册了 4 个原生函数，任何脚本可直接调用：
+Rust 宿主在 Scheme 全局环境中注册了以下 `engine:` 原生函数（`src/logic/mod.rs`），任何脚本可直接调用（ECS 与状态门面原语见 2.3 与 `scheme_developer_guide.md` 第 2 节）：
 
 | 宿主函数签名 | 参数说明 | 职责与效果 |
 | :--- | :--- | :--- |
 | `(engine:send-message pid channel text)` | `pid`: 玩家整数 ID<br>`channel`: 通道名（如 `"system"`, `"combat"`, `"chat"`）<br>`text`: 消息文本 | 向指定在线玩家推送一条独立的 `TextCraftEvent::Message` 事件帧 |
 | `(engine:broadcast channel text)` | `channel`: 通道名<br>`text`: 消息文本 | 向全服所有在线玩家广播一条 `TextCraftEvent::Message` 事件帧 |
 | `(engine:log text)` | `text`: 日志内容 | 输出到服务端 `tracing` 标准日志（target: `"scheme"`） |
-| `(engine:random-int lo hi)` | `lo`, `hi`: 整数边界 | 生成 `[lo, hi]` 闭区间内的均匀伪随机整数 |
+| `(engine:random-int lo hi [seed])` | `lo`, `hi`: 整数边界；可选第三参为种子 | 生成 `[lo, hi]` 闭区间内的均匀伪随机整数；底层是宿主自持的 xoshiro256++ PRNG（状态进快照 v3，无系统熵）。prelude 在此之上提供 `(random:seed! n)` / `(random:reset!)` / `(engine:seed-prng seed)` |
+| `(engine:prng-state)` / `(engine:set-prng-state! state)` | PRNG 内部状态（4×u64） | 读写 PRNG 状态，供快照/调试使用，一般脚本不需要直接调用 |
+| `(engine:strip-ansi text)` | `text`: 带 ANSI 转义的文本 | 剔除 ANSI 颜色转义码，返回纯文本 |
+| `(engine:raw-mcp-store-get/set!/delete!/list ...)` | MCP 黑板原始读写 | 宿主内部桥接原语；脚本应使用 prelude 封装的 `mcp-store:*` / `engine:mcp-store-*`（见 `scheme_developer_guide.md` 2.11），不要直接调用 raw 版本 |
 
 ---
 
-### 2.3 全局数据结构 Schema (`*world-state*`)
+### 2.3 全局状态 Schema（WorldState 单例 + `state:*` 门面）
 
-在 `scripts/prelude.scm` 中定义的全局状态树结构如下：
+基座改造后，模型状态不再有 Scheme 侧的全局变量：宿主在 ECS 中维护一个单例实体 `WorldState`（id 固定 518），原 `*world-state*` 的每个顶层键 = 该实体 `DynamicProps` 里的一个键，随 ECS 世界一起进快照 v3。脚本一律经门面原语读写（`src/logic/ecs_ffi.rs` 注册，prelude 提供带默认值的桥接）：
 
 ```scheme
-(define *world-state*
-  (hash
-    "tick_count" 0          ;; 全局时钟心跳计数
-    "elapsed_sec" 0.0       ;; 游戏累计运行秒数
-    "target_fps" 60         ;; 当前目标帧率 (1 ~ 60)
-    "idle_timer" 0.0        ;; 距离上次玩家交互的空闲秒数
-    "chunks" (hash)         ;; 16x16 分块地图存储: "cx,cy" -> (hash "tiles" (hash "x,y,layer" tile))
-    "players" (hash)        ;; 当前在线玩家表: pid-string -> player-hash
-    "saved_players" (hash)  ;; 跨会话持久化玩家表: token-string -> player-hash
-    "monsters" '()          ;; 活跃怪物列表: (list monster-hash ...)
-    "double_width" #f       ;; 全局默认双宽模式开关 (#t / #f)
-    "timers" (hash)))       ;; 自定义计时器字典
+(state:get key [default])     ;; 读键，不存在返回 #f 或 default
+(state:set! key value)        ;; 写键
+(state:has? key)              ;; 键是否存在
+(state:remove! key)           ;; 删键
+(state:all)                   ;; 全部键值组成的 hash（engine:export-state 即返回它）
+(state:replace! hash)         ;; 整表替换（engine:import-state / 热重载恢复用）
+(state:seed-defaults! hash)   ;; 只填缺失键（装载期种子，热重载不抹已有状态）
+(state:keys)                  ;; 全部键名列表
+(state:entity-id)             ;; 单例实体 id（518）
 ```
+
+示例模型 `models/roguelike/` 的状态键如下（键集合由模型自定，基座不理解其 schema）：
+
+```scheme
+"tick_count" 0          ;; 权威模拟时钟（每步由 engine:on-tick 经 state:set! +1；快照顶层 tick 由它读出）
+"elapsed_sec" 0.0       ;; 游戏累计运行秒数
+"target_fps" 60         ;; 当前目标帧率 (1 ~ 60)
+"idle_timer" 0.0        ;; 距离上次玩家交互的空闲秒数
+"chunk:<cx>,<cy>" (hash "tiles" (hash))  ;; 地图按 16x16 chunk 分键存储: "x,y,layer" -> tile（旧单键 "chunks" 由 prelude 首触时无损拆分迁入）
+"players" (hash)        ;; 当前在线玩家表: pid-string -> player-hash
+"saved_players" (hash)  ;; 跨会话持久化玩家表: token-string -> player-hash
+"monsters" '()          ;; 活跃怪物列表: (list monster-hash ...)
+"double_width" #f       ;; 全局默认双宽模式开关 (#t / #f)
+"timers" (hash)         ;; 自定义计时器字典
+```
+
+注意：经门面往返的值按 JSON 语义保型（整数/浮点/布尔/字符串/嵌套 hash/list）；Scheme 的 char/symbol 会降为 string，不要往单例里存闭包或不可序列化的值。
 
 #### 标准瓦片模型 (Tile Schema)
 ```scheme
@@ -185,7 +204,7 @@ Rust 宿主在 Scheme 全局环境中注册了 4 个原生函数，任何脚本�
 
 ---
 
-### 2.4 核心内置 API 参考 (`scripts/prelude.scm`)
+### 2.4 核心内置 API 参考 (`models/roguelike/prelude.scm`)
 
 #### 1. 地图分块读写 API
 ```scheme
@@ -211,7 +230,7 @@ Rust 宿主在 Scheme 全局环境中注册了 4 个原生函数，任何脚本�
 ;; 获取在线玩家，若不存在则自动初始化默认角色
 (ensure-player player-id)
 
-;; 更新玩家状态 (同时自动同步至 *world-state*["saved_players"][token] 并递增视觉版本号)
+;; 更新玩家状态 (同时自动同步至单例 "saved_players" 键的对应条目 并递增视觉版本号)
 (set-player player-id player-map)
 
 ;; 移除在线玩家 (下线时调用，保留 saved_players 中的持久化存档)
@@ -241,16 +260,16 @@ Rust 宿主在 Scheme 全局环境中注册了 4 个原生函数，任何脚本�
 
 ---
 
-### 2.5 标准生命周期钩子契约 (`scripts/main.scm`)
+### 2.5 标准生命周期钩子契约 (`models/roguelike/main.scm`)
 
-`scripts/main.scm` 必须定义以下函数供 Rust 宿主调用：
+模型 `main.scm` 定义以下函数供 Rust 宿主调用（宿主识别的钩子全集以 `src/logic/mod.rs` 的 HOOKS 清单为准）：
 
 | 钩子函数签名 | 触发阶段 | 职责说明 |
 | :--- | :--- | :--- |
 | `(engine:on-init)` | 服务启动初始化 | 初始化地图（`init-demo-world`）、生成初始实体（若存在存档文件，宿主随后会自动调用 `engine:import-state` 覆盖恢复） |
 | `(engine:target-fps)` | 每帧调度计算前 | 返回整数 `1 ~ 60`，控制宿主主循环节拍（活动时 `60`，空闲 >2s 降为 `30`，空闲 >5s 降为 `15`） |
 | `(engine:viewport-size pid)` | 渲染快照时 | 返回 `(list cols rows)`，默认 `'(80 24)` |
-| `(engine:hud-config)` | 主题配置查询 | 返回全局 HUD 默认配置字典 |
+| `(engine:hud-config)` | 主题配置查询 | 返回全局 HUD 默认配置字典（示例模型自定义函数，非宿主 HOOKS 清单成员） |
 | `(engine:on-player-join pid token)` | 玩家首次认证入场 | 解析 `username:token`，清理同 `identity_key` 的旧 `pid`，从 `saved_players` 恢复或新建角色并置 `"online" #t` |
 | `(engine:on-player-disconnect pid)` | 玩家断线进入 60s 宽限期 | 将玩家 `"online"` 设为 `#f`（保留内存态，立即从他人视口与怪物索敌中隐藏，不删档、不刷屏） |
 | `(engine:on-player-reconnect pid)` | 宽限期内恢复连接 | 将玩家 `"online"` 设为 `#t` 并递增视觉版本号（无需重复走 `join` 或刷欢迎日志） |
@@ -260,8 +279,8 @@ Rust 宿主在 Scheme 全局环境中注册了 4 个原生函数，任何脚本�
 | `(engine:on-ui-action pid action-map)`| 主循环第 3/4 阶段 | 处理前端 HUD 发送的交互动作（如 `"use_item"`, `"buy_potion"`, `"close_dialog"`, `"clear_logs"`） |
 | `(engine:on-command pid datum raw)` | 主循环第 4 阶段 | 处理玩家输入的控制台命令（`datum` 已由宿主安全 Reader 预解析为 S-表达式，零代码注入风险） |
 | `(engine:render-snapshot pid)` | 主循环第 7 阶段 | 返回 `(hash "screen" ansi-str "cols" cols "rows" rows "hud" hud-map)` |
-| `(engine:export-state)` | 自动存档/热重载前 | 返回 `*world-state*` |
-| `(engine:import-state data)` | 启动读档/热重载后 | 将 `data` 恢复至 `*world-state*` 并调用 `(bump-visual-version!)` |
+| `(engine:export-state)` | 自动存档/热重载前 | 返回 `(state:all)`，即 WorldState 单例的全部键值 |
+| `(engine:import-state data)` | 启动读档/热重载后 | 以 `(state:replace! data)` 整表恢复单例并调用 `(bump-visual-version!)`；未定义此钩子的模型由宿主直接读写单例 |
 
 ---
 
@@ -372,7 +391,7 @@ TextCraft.sendMouse(10, 5, 'left');
 
 假设你要为游戏增加一个“木材/矿石资源显示 + 合成铁剑按钮”：
 
-#### 第一步：在 Scheme (`scripts/prelude.scm`) 的 `build-player-hud` 中下发新字段
+#### 第一步：在 Scheme (`models/roguelike/prelude.scm`) 的 `build-player-hud` 中下发新字段
 ```scheme
 (define (build-player-hud player-id)
   (let ((p (ensure-player player-id)))
@@ -388,7 +407,7 @@ TextCraft.sendMouse(10, 5, 'left');
       "logs" (map-get p "logs" '()))))
 ```
 
-#### 第二步：在 Scheme (`scripts/main.scm`) 的 `engine:on-ui-action` 中处理合成动作
+#### 第二步：在 Scheme (`models/roguelike/main.scm`) 的 `engine:on-ui-action` 中处理合成动作
 ```scheme
 ;; 在 engine:on-ui-action 的 cond 中添加分支：
 ((equal? action "craft_sword")
@@ -429,7 +448,7 @@ TextCraft.sendMouse(10, 5, 'left');
 ### 配方 2：新增一种带环境伤害的地形瓦片（如：岩浆 Lava）
 
 ```scheme
-;; 1. 在地图上放置岩浆瓦片 (scripts/main.scm)
+;; 1. 在地图上放置岩浆瓦片 (models/roguelike/main.scm)
 (world:set-tile 3 3 'terrain
   (hash "glyph" "~"
         "fg" '(255 120 20)
@@ -453,8 +472,8 @@ TextCraft.sendMouse(10, 5, 'left');
 ### 配方 3：热重载与管理员实时 REPL 调试技巧
 
 1. **保存即热重载（`--watch` / `-w` 开启，零重启）**：
-   开发调试时通过 `cargo run -- --watch --log-level debug`（或 `-w`）启动服务端，宿主会每 2 秒轻量检查一次 `scripts/` 根目录下的 `.scm` 修改时间（未开启 `--watch` 时默认零开销短路）。修改 `scripts/prelude.scm` 或 `scripts/main.scm` 保存后，宿主会自动调用 `(engine:export-state)` 备份当前所有分块与玩家数据，重编译脚本后再通过 `(engine:import-state)` 无缝恢复（若新脚本存在语法错误，宿主会自动回滚状态并保留旧环境运行，不会崩溃）。
-2. **管理员 `!` REPL 在线求值与多用户 URL 路由**：
+   开发调试时通过 `cargo run -- --watch --log-level debug`（或 `-w`）启动服务端，宿主会每 2 秒轻量检查一次模型目录（`--scripts-dir`，默认 `models/roguelike/`）下的 `.scm` 修改时间（未开启 `--watch` 时默认零开销短路）。修改 `prelude.scm` 或 `main.scm` 保存后，宿主会自动调用 `(engine:export-state)` 备份当前单例状态，重编译脚本后再通过 `(engine:import-state)` 无缝恢复；ECS 实体与单例本身不随脚本重编译清空（若新脚本存在语法错误，宿主会自动回滚并保留旧环境运行，不会崩溃）。MCP 工具 `reload_scripts` 的 `clean: false` 走同一路径，`clean: true` 则清空世界并重新执行 `(engine:on-init)`。
+2. **管理员 `!` REPL 在线求值与多用户 URL 路由**（仅 dev 模式；`--eval` 评测模式下 `!` REPL 被门禁拒绝）：
    前端支持 `#/username` 与 `#/username/token` 路由（例如 `http://127.0.0.1:8081/#/alice` 或 `http://127.0.0.1:8081/#/bob/admin`，也兼容 `?user=bob&token=admin` 或 `?token=admin`）。当 URL 显式指定身份时不会覆盖 `localStorage`，方便单浏览器多开标签页联机调试。携带管理员 Token（默认 `admin`）后，在底部命令框输入 `!` 开头的任意 Scheme 代码即可直接操作线上世界：
    - `! (get-player 1)` $\rightarrow$ 查看玩家 1 的完整 Hash 数据
    - `! (set-player 1 (hash-insert (ensure-player 1) "gold" 9999))` $\rightarrow$ 在线修改玩家金币

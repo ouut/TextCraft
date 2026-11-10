@@ -23,3 +23,7 @@
   - `mcp_storage_test` 的 checkpoint 存储形状断言迁至快照 v2 包装（`world_state` 嵌套 + format/version 断言），回滚行为断言不变；
   - `integration_tests::test_8_state_persistence_shutdown_and_restart` 的存档文件形状断言迁至 v2（同上），重启恢复断言不变；
   - `integration_tests` 两处 `ServerArgs` 字面构造补 `eval: false`（第 5 项新字段，dev 默认）。
+
+---
+
+> **编者注（2026-11-10 文档刷新时追加，不改动上文任何数字）**：本文件是改造前基线与第 2–8 项改造后结果的**历史快照**，上文「改造后结果」的 130/129 不是当前数字。其后还有两轮：协同修复轮后全量 137 个、稳定通过 134；第二轮（双存储消灭＋market_sim）后全量 144 个、稳定通过 143，唯一稳定失败始终为 `phase5_scale_benchmark` 的光栅化性能预算。现状口径以 `docs/project/known_limitations.md` (d) 为准。

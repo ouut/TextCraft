@@ -51,7 +51,7 @@ Scheme 的灵魂是 **REPL（Read-Eval-Print Loop）**。如果你还在“写�
 4. 整个过程中，服务器从未停机，业务状态完好保留。
 
 ### 2. TextCraft 在线 REPL 实战技巧
-TextCraft 3.0 提供了开箱即用的 REPL 调试通道：
+TextCraft 提供了开箱即用的 REPL 调试通道（dev 模式；`--eval` 评测模式下 `!` REPL 被门禁，见 `mcp_developer_guide.md` 第五节）：
 - **Web 终端前端 `!` 快捷 REPL**：
   访问 `http://127.0.0.1:8081/#/admin_user/admin`，在底部命令框中以 `!` 开头直接输入任意 Scheme 表达式：
   ```scheme
@@ -92,7 +92,7 @@ TextCraft 3.0 提供了开箱即用的 REPL 调试通道：
 
 ### 2. 数据驱动的巨大红利
 - **零成本跨语言传输**：纯数据哈希字典可以直接通过 WebSocket 序列化推给前端 Web 客户端（`hud` 字段），前端直接拿原生 JS Object 使用。
-- **磁盘存档零转换**：在 TextCraft 中，`(engine:export-state)` 只需直接把 `*world-state*` 倾倒为 JSON 文件，读档时直接加载，不需要任何繁琐的 ORM 或 DTO 映射。
+- **磁盘存档零转换**：在 TextCraft 中，模型状态以纯数据存放在 ECS 的 WorldState 单例里，`(engine:export-state)` 直接返回 `(state:all)`；宿主存档（快照 v3）把单例随 ECS 世界一并序列化，读档直接恢复，不需要任何繁琐的 ORM 或 DTO 映射。
 - **热重载永不崩溃**：纯数据中没有任何无法序列化的 Lambda 闭包指针，热重载时代码逻辑完全更新，而世界状态无缝保留。
 
 ---
@@ -136,9 +136,10 @@ TextCraft 3.0 提供了开箱即用的 REPL 调试通道：
 
 在函数式编程界，“严禁使用任何 `set!`”是一种极端的教条主义。真正的工程级最佳实践是：**“外部纯净无副作用，内部局部快如闪电”**。
 
-### 1. 全局状态：严格不可变（Immutability）
-- 对于全服玩家可见的公共状态（如 `*world-state*`、玩家属性、地图分块），坚持使用持久化不可变操作（如 `hash-insert`, `hash-remove`）。
-- 任何全局状态改变都应当是显式版本化的（例如调用 `(bump-visual-version!)`），这能让 Rust 宿主以 `< 0.05ms` 的微秒级开销完成视口光栅化去重。
+### 1. 全局状态：单一权威 + 值不可变（Single Authority, Immutable Values）
+- 全局状态只有一个家：Flecs ECS。实体性状态用 `ecs:*` 组件/关系，玩家表、地图分块等键值状态存 WorldState 单例、一律经 `state:get` / `state:set!` 门面读写——**不要再定义自己的全局状态变量**，那会绕开快照与状态哈希、制造第二份权威（旧的 `*world-state*` 已因此被消灭）。
+- 门面里存的**值**仍坚持用持久化不可变操作构造（如 `hash-insert`, `hash-remove` 先算出新 hash 再 `state:set!` 写回），避免原地改值带来的别名与回滚问题；同时注意 char/symbol 经门面往返会降为 string，闭包不可序列化、禁止入内。
+- 任何影响画面的全局状态改变都应当是显式版本化的（例如调用 `(bump-visual-version!)`），这能让 Rust 宿主以 `< 0.05ms` 的微秒级开销完成视口光栅化去重。
 
 ### 2. 局部算法：务实利用局部可变性与尾递归
 - **尾递归（TCO）**：当编写状态机演化、图遍历时，写成标准尾递归形式，Steel 编译器会直接优化为机器级无堆栈溢出的循环跳转：
@@ -212,6 +213,10 @@ Lisp 拥有世界上最强大的元编程能力，但新手最容易犯的错误
 
 (provide handle-player-move)
 ```
+
+### 3. 确定性规范：评测期可用的设施边界（TextCraft 项目约束）
+- 游戏逻辑的随机一律走宿主 `(engine:random-int ...)`（xoshiro256++，状态进快照）；时间语义用模型自维护的 `tick_count`，不要读墙钟。
+- `steel/time`、`steel/random`、`steel/meta`、`steel/filesystem`、`steel/ports`、`steel/process` 在 `--eval` / `run_epoch` 期间会被宿主替换为报错桩（含 `(require-builtin ...)` 重新引入的路径）。把它们用于调试可以，但**不要让玩法逻辑依赖它们**，否则评测时直接报错、且 dev 下的运行结果不可复现。
 
 ---
 

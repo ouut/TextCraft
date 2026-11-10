@@ -4,6 +4,41 @@
 
 ---
 
+## [feat/simulator-upgrade] - 2026-11-10（模拟器基座改造，未发布）
+
+在 v5.0 分支上开出的改造分支：把基座从「带 Agent 控制面的 Roguelike 引擎」收口为「合格的通用逻辑模拟器」。分三轮落地，验收口径统一为「不新增失败」（基线见 `docs/project/baseline_v5_test_results.md`）。
+
+### 第一轮：第 1–8 项升级（状态清单 → 依赖锁定）
+
+- **状态清单（第 1 项）**：新增 `docs/project/state_inventory.md`，逐项登记全部状态的所有者/写入口/快照字段，并裁定 `tick_count` 为权威模拟时钟、`server_tick` 降为传输层计数。
+- **全量快照 v2（第 2 项）**：`EcsWorld` 新增 ECS 世界导出/导入（实体 id 用 Flecs `make_alive` 原样保持，SpatialGrid 导入后重建）；checkpoint 改为 Rust 宿主实现，存档升 v2——回滚从此覆盖 ECS 侧的肢体/液体/关系状态（此前只存 Scheme 状态）。
+- **可序列化 PRNG（第 3 项）**：自持 xoshiro256++（splitmix64 播种、Lemire 取区间，映射方法属复现契约），全面替换 StdRng，`thread_rng` 清零；随机状态进快照。
+- **状态哈希与评测协议（第 4 项）**：规范序列化（JSON 键递归排序）＋SHA-256 状态哈希、MCP 宿主工具 `state_hash` / `run_epoch` / `create_checkpoint` / `rollback_checkpoint`，断言改为宿主侧按 `{path, op, expected}` 对导出状态求值，不回被评测 VM 执行。
+- **eval 模式（第 5 项）**：新增 `--eval`，在 MCP 分发层一处冻结写类工具（`ecs_modify`、`!` REPL、`reload_scripts`、外部 checkpoint、同 VM 断言、动态工具冻结到装载期集合）；dev 模式（默认）的全部开发能力原样保留。
+- **范围裁定与模型迁移**：按「通用底座」定位，肉鸽脚本从 `scripts/` 整体迁为 `models/roguelike/` 示例模型包（附 `model.json` 与 `assertions.json`）；新增非网格夹具 `counter_economy` 跑通 epoch 并升为主要验收路径（第 6 项）。
+- **manifest 与依赖锁定（第 7、8 项）**：模型目录 `model.json` 在装载时校验，快照导入对 name/state_schema/version 错配显式拒绝；`flecs_ecs` 锁定 git rev `bf956db`，`Cargo.lock` 入库，`cargo test --locked` 通过。
+- 测试：全量 130 个，稳定通过 129（唯一稳定失败为基线在册的光栅化性能预算）。
+
+### 第二轮：多 Agent 协同修复（快照完整性 / 评测可信 / CI）
+
+- **快照导出判据修订**：从「带四核心组件之一」改为「携带任何组件/标签/关系/名字的游戏实体都导出」（纯标签/纯关系实体可往返），flecs 基础设施实体以三重判据排除；未知 Rust 组件不再静默丢弃，导出条目以 `unknown_components` 列名。
+- **SHA-256 换回 sha2 crate**（第一轮时因 crates.io 拉取受限曾用本地实现，哈希值一致、无痛切换）。
+- **eval 语言层门禁**：实测 Steel 可达的非确定性设施（time/random/meta 的环境与代码加载逃逸口/fs/ports/process），eval 下替换为报错桩，并同步替换 7 个模块注册表项，防止 `(require-builtin ...)` 撤销影子替换；dev 模式可完整恢复。
+- **epoch 报告可追溯**：新增 `host` 指纹（crate 版本、flecs_ecs rev、steel-core 版本，均为编译期常量）与 `dt: {source: "fixed"}`；live 循环墙钟 dt 处加 DETERMINISM BOUNDARY 注释，确定性边界落到代码与文档。
+- **CI 与残留登记**：新增 `.github/workflows/test.yml`（必过套件逐个列举，`phase5_scale_benchmark` 单独 `continue-on-error`）；新增 `docs/project/known_limitations.md` 登记结构性残留。
+- 测试：全量 137 个，稳定通过 134。
+
+### 第三轮：消灭双存储 + 非网格 ECS 实证
+
+- **Flecs 单一权威**：宿主急切创建单例实体 `WorldState`（id 518）＋ `DynamicProps`，承载原 `*world-state*` 全部顶层键（地图按 `chunk:<cx>,<cy>` 分键，旧单键由 prelude 首触无损拆分）；新增 Scheme 门面 `state:get` / `state:set!` / `state:has?` / `state:remove!` / `state:all` / `state:replace!` / `state:seed-defaults!` / `state:keys` / `state:entity-id`，仓库内模型对 `*world-state*` 的直接读写清零；`tick_count` 权威迁入 ECS。
+- **快照 v3**：顶层只含 `{format, version: 3, model, tick, prng, ecs_world}`，不再有 `world_state` 段；导入兼容 v2（其 `world_state` 段灌入单例），写出永远是 v3。固定 epoch 回归哈希因存储布局变化更新为 `28e8df35…`（非行为变化，多跑一致）。
+- **施工中修复两个真 bug**：clean 热重载后种子累积导致 tick 跨轮增长；单例 props 整表克隆导致单 tick 0.26ms→16ms（改直达目标键后回到 0.30ms）。
+- **market_sim 实证**：新增 `tests/fixtures/models/market_sim/`——账户/商户/订单全程用 ECS 组件＋关系（`Owns`/`TradesWith`/`PlacedBy`/`FilledBy`/`PartOf`）＋标签建模，零网格原语；epoch 精确断言与快照回滚续跑哈希一致均通过。「用 ECS 的非网格模型」自此有端到端实证。
+- **新残留登记**：回滚后新 spawn 实体 id 不续号致续跑哈希发散（market_sim 以有界槽位池绕开）；`state:get` 读整 chunk 仍有转换成本。详见 `docs/project/known_limitations.md`。
+- 测试：全量 144 个，稳定通过 143（唯一稳定失败仍为光栅化性能预算）。
+
+---
+
 ## [v5.0.0] - 2026-11-09
 
 TextCraft 5.0 是里程碑式的工业级升级，全面确立 **“Flecs ECS 权威底座 (Rust) + 原生 sub-5μs ANSI 光栅化 (Rust) + 数学密集算子 (Rust) + Agent 自动驾驶推演 (Rust/MCP) + Caves of Qud 涌现业务逻辑 (Steel Scheme)”** 的现代化游戏引擎体系：

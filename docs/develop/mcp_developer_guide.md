@@ -1,12 +1,14 @@
 # TextCraft 5.0: MCP (Model Context Protocol) 开发者与 AI 协同开发指南
 
+> **当前分支状态（feat/simulator-upgrade，2026-11-10 基座改造后）**：宿主工具集新增快照 v3 检查点（`create_checkpoint` / `rollback_checkpoint`）、状态哈希（`state_hash`）与确定性评测（`run_epoch`＋宿主侧断言）；服务端新增 `--eval` 评测模式，冻结全部写类工具与 Scheme 非确定性设施（见第五节）。模型脚本位于模型目录（`--scripts-dir`，默认 `models/roguelike/`）。模型状态的唯一权威是 Flecs ECS（含 `WorldState` 单例），不存在独立的 `*world-state*`。
+
 > [!IMPORTANT]
 > **TextCraft 5.0 MCP 核心设计哲学**：
 > TextCraft 采用 **「单进程 `--mcp-port` HTTP JSON-RPC 2.0 管道 + Flecs ECS 权威底座透视 + Agent 自动驾驶与无头推演 + Scheme 动态可扩展 MCP 工具注册表」** 架构。
 > - **同进程实时同屏**：AI 客户端通过 HTTP 连接正在运行的游戏服务端，AI 的每一次指令、传送、刷怪或代码热改都会在人类玩家的浏览器视口与 HUD 日志中毫秒级同步展现！
 > - **权威 ECS 状态透视**：通过 `ecs_inspect`、`ecs_query` 与 `ecs_modify`，AI 可以亚微秒级穿透 C-Core 内存直接检索、内省和原子修改万级实体、解剖学肢体树与化学液体池！
-> - **无头虚拟推演与时空旅行**：支持以任意时间步长 `dt` 进行无头仿真推演 (`sim_step`)、确定性随机种子 (`seed`)、状态作用域差分 (`state_diff`)、批量断言测试 (`assert_state`) 与隔离的智能体黑板记忆 (`mcp_storage_*`)。
-> - **零编译动态造工具**：AI 与开发者无需修改或重新编译任何 Rust 代码，只需在 `scripts/*.scm`（或在线 `!` REPL）中调用 `(mcp:def-tool ...)` 并搭配 `(ecs:* ...)` 原语即可随时扩展全新的 ECS MCP 工具！
+> - **无头虚拟推演与时空旅行**：支持以任意时间步长 `dt` 进行无头仿真推演 (`sim_step`)、确定性随机种子 (`seed`)、状态作用域差分 (`state_diff`) 与隔离的智能体黑板记忆 (`mcp_storage_*`)；确定性评测请走 `run_epoch`（宿主断言在被评测 VM 之外求值），`assert_state` 仅限 dev 模式调试。
+> - **零编译动态造工具**：AI 与开发者无需修改或重新编译任何 Rust 代码，只需在模型脚本（或在线 `!` REPL，限 dev 模式）中调用 `(mcp:def-tool ...)` 并搭配 `(ecs:* ...)` 原语即可随时扩展全新的 ECS MCP 工具！
 
 ---
 
@@ -23,7 +25,7 @@ flowchart LR
         Chan["无锁 mpsc + oneshot 通道"]
         TickLoop["主循环 tick(dt) -> drain_mcp_requests()"]
         HostBridge["宿主核心桥接工具<br>game_command / player_input / reload_scripts"]
-        SchemeVM["Steel Scheme VM<br>(mcp:def-tool 动态注册表 & *world-state*)"]
+        SchemeVM["Steel Scheme VM<br>(mcp:def-tool 动态注册表；状态在 ECS WorldState 单例)"]
         WSGateway["WebSocket 网关 (:8081)"]
     end
 
@@ -38,7 +40,7 @@ flowchart LR
 ```
 
 ### 为什么采用单进程 `--mcp-port` 通道转发？
-1. **绝对线程安全与零锁竞争**：`SchemeLogic`（内含 Steel VM 与 `*world-state*`）驻留在主循环线程。Axum MCP HTTP Handler 收到 JSON-RPC 2.0 请求后，通过 `mpsc::unbounded_channel` 将请求投递给主循环，并在 `TextCraftServer::tick()` 的 `drain_mcp_requests()` 阶段顺序执行，彻底消除多线程并发读写虚拟机状态的竞态风险。
+1. **绝对线程安全与零锁竞争**：`SchemeLogic`（内含 Steel VM 与 Flecs 世界句柄）驻留在主循环线程。Axum MCP HTTP Handler 收到 JSON-RPC 2.0 请求后，通过 `mpsc::unbounded_channel` 将请求投递给主循环，并在 `TextCraftServer::tick()` 的 `drain_mcp_requests()` 阶段顺序执行，彻底消除多线程并发读写虚拟机状态的竞态风险。
 2. **与浏览器玩家共享同一世界**：传统 Stdio MCP 会启动一个孤立的子进程，导致 AI 看不到浏览器中正在游玩的玩家。通过 `--mcp-port 8082`，AI 直接接入人类玩家所在的同一个内存世界。
 3. **ANSI 自动剥离（Token 极简友好）**：游戏推给浏览器的是带 24-bit TrueColor ANSI 转义序列的字符流，而 MCP 接口通过 `strip_ansi_codes`（及 Scheme 宿主函数 `(engine:strip-ansi str)`）自动剥离颜色控制码，向大模型返回干净紧凑的纯文本 ASCII 2D 网格画面。
 
@@ -148,7 +150,7 @@ Rust 宿主层内置了 **3 个永不失效的核心桥接工具**（即使 `.sc
   ```
 
 ### 3. `reload_scripts` —— 热重载与干净重置 `.scm` 脚本
-无视 `--watch` 开关或 2 秒轮询间隔，立即扫描并重编译 `scripts/` 下的全部 `.scm` 根脚本文件。
+无视 `--watch` 开关或 2 秒轮询间隔，立即扫描并重编译当前模型目录（`--scripts-dir`，默认 `models/roguelike/`）下的全部 `.scm` 根脚本文件。
 支持可选参数 `clean: bool`（**默认 `true`**）：
 - **干净重置模式（`clean: true`，默认/缺省）**：
   编译新脚本后，**不恢复旧状态**，主动重新调用 `(engine:on-init)`，以全新初始状态重置世界并刷新画面（递增渲染版本号），适合 AI Agent 重新初始化世界或开发新游戏原型时使用。
@@ -162,7 +164,7 @@ Rust 宿主层内置了 **3 个永不失效的核心桥接工具**（即使 `.sc
   ```
   （注：调用时不传 `arguments` 或省略 `clean` 字段同样默认执行干净重置。）
 - **无损热补丁模式（`clean: false`）**：
-  保持原有的无损热重载逻辑，在编译前导出当前虚拟机状态，并在编译成功后完整恢复 `*world-state*`（用于玩家在线游玩时无缝打热补丁）。
+  保持原有的无损热重载逻辑，在编译前经 `(engine:export-state)` 导出当前 WorldState 单例状态，并在编译成功后经 `(engine:import-state)` 完整恢复（ECS 实体不随脚本重编译清空；用于玩家在线游玩时无缝打热补丁）。
   ```json
   {
     "name": "reload_scripts",
@@ -239,6 +241,9 @@ Rust 宿主层内置了 **3 个永不失效的核心桥接工具**（即使 `.sc
 返回仅包含请求路径的树状 JSON 对象，极大节省大模型上下文 Token。
 
 ### 8. `eval_assertion` / `assert_state` —— 批量断言与富差值对比 (TDD 单元测试套件)
+
+> **注意（基座改造后）**：这两个工具是在被测模型同一个 Scheme VM 内求值断言，只适合 dev 模式调试。正式评测必须走 `run_epoch` 的**宿主侧断言**（第 22 条）：断言以 `{path, op, expected}` 数据形式给出，由 Rust 宿主对导出的快照 v3 状态求值，被评测的模型代码无法干预。在 `--eval` 模式与 `run_epoch` 执行期间，`eval_assertion` / `assert_state` 会被门禁拒绝。
+
 在带有看门狗保护的 Scheme 沙箱中求值单个或批量断言表达式，支持富差值诊断：
 - **单表达式模式**：支持 `expr` 或 `code` 字符串参数。
 - **批量模式 (`exprs: string[]`)**：
@@ -421,31 +426,71 @@ Rust 宿主层内置了 **3 个永不失效的核心桥接工具**（即使 `.sc
 - `relate` / `unrelate`：建立或解除关系对（如 `EquippedOn`、`PartOf`）；
 - `despawn: true`：物理销毁实体及其关联的子级关系树。
 
+### 19. `create_checkpoint` —— 宿主快照 v3 检查点（全量因果状态）
+由 Rust 宿主实现：把当前全部因果状态拍成快照 v3（Flecs 世界——含 `WorldState` 单例与全部实体/标签/关系——＋ PRNG 状态 ＋ tick），以标签存入 MCP 黑板的 `checkpoint` 命名空间（黑板只是存储介质，不随回滚被回滚）：
+```json
+{
+  "name": "create_checkpoint",
+  "arguments": { "tag": "before_boss" }
+}
+```
+- `tag` 可选，默认 `"latest"`。
+- 这是当前唯一的检查点正道：覆盖 ECS 侧状态（旧的脚本版 checkpoint 只存 Scheme 状态，见第四节的兼容垫片说明）。
+
+### 20. `rollback_checkpoint` —— 回滚到宿主检查点
+按标签恢复 `create_checkpoint` 拍下的快照（世界按实体 id 原样重建，PRNG 与 tick 一并恢复）。导入兼容 v2 快照（其 `world_state` 段会灌入 WorldState 单例）；存入的不是快照格式的历史杂值会被显式报版本错误，不会静默接受。标签不存在时返回未找到。
+
+### 21. `state_hash` —— 当前状态的规范哈希
+无参数。返回当前快照 v3 的 SHA-256 哈希（规范序列化：JSON 键递归排序后经 `sha2` 计算）。相同因果状态必然得到相同哈希，是确定性与回滚验收的判据。
+
+### 22. `run_epoch` —— 确定性评测一轮（干净重置 → 装载 → 种子 → 步进+输入 → 宿主断言 → 报告）
+```json
+{
+  "name": "run_epoch",
+  "arguments": {
+    "scripts_dir": "tests/fixtures/models/market_sim",
+    "seed": 7,
+    "steps": 10,
+    "dt": 0.016,
+    "inputs": [
+      { "step": 0, "player_id": 1, "type": "key", "code": "KeyB", "action": "down" }
+    ],
+    "assertions": [
+      { "path": "accounts.alice.balance", "op": "eq", "expected": 946 },
+      { "path": "tick_count", "op": "exists" }
+    ]
+  }
+}
+```
+- 参数：`scripts_dir`（模型目录，内含 `model.json` manifest，缺失字段按默认值推导；manifest 的 name/state_schema 与快照不符会被显式拒绝）、`seed`（缺省取 manifest 的 `default_seed`）、`steps`、`dt`（固定步长，缺省 0.016）、`inputs`（按步注入）、`assertions`（可省略，缺省读 manifest 指向的断言文件）。
+- 断言格式 `{path, op, expected}`：`path` 是对导出状态的点分路径（如 `players.1.hp`、`tick_count`）；`op` 取 `eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `exists` / `absent`；由宿主在被评测 VM 之外求值。
+- 返回的 epoch 报告不含任何时间戳/耗时，同配置双跑逐字节相同，字段包括：`mode: "eval"`、`host`（宿主指纹：`crate_version` / `flecs_ecs_rev` / `steel_core_version`，均为编译期常量）、`dt: {source: "fixed", value}`、`scripts_hash`、`assertions_hash`、`seed`、`steps`、`final_state_hash`、`all_passed`、`results`。
+- epoch 执行期间自动启用 eval 门禁（工具层＋语言层，见第五节），结束后恢复（常驻 `--eval` 除外）。
+
 ---
 
 ## 四、 Scheme 动态 MCP 工具系统 (`mcp:def-tool`)
 
-### 4.1 核心范式：时光机快照与专用 MCP 存储（mcp-store）的纯脚本自举实现
+### 4.1 核心范式：检查点已收归宿主，黑板只作存储介质
 
-TextCraft 贯彻**「机制在宿主，策略与功能在脚本」**的极简架构哲学。
-Rust 宿主仅提供一组通用的专用存储 KV 桥接原语（`engine:raw-mcp-store-*` 与 Scheme 封装函数 `(mcp-store:set! ...)`、`(mcp-store:get ...)`），完全不需要在宿主为快照特化硬编码接口。
+基座改造前，检查点是脚本用黑板原语自举的（只存 Scheme 侧状态，覆盖不到 ECS 实体与 PRNG，是回滚丢肢体/液体状态的根源）。改造后**检查点由 Rust 宿主实现**：`create_checkpoint` / `rollback_checkpoint` 是宿主工具（第 19、20 条），快照 v3 覆盖全部因果状态，MCP 黑板（`engine:raw-mcp-store-*` 与 `(mcp-store:set! ...)` 等封装）只充当按标签存放快照的介质，本身仍是 Agent 记忆、不是世界状态，恢复快照不会回滚黑板。
 
-Scheme 脚本利用通用存储原语，将快照写入专用 MCP 存储的 `"checkpoint"` 命名空间中，并通过 `(mcp:def-tool ...)` 动态注册 `create_checkpoint` 和 `rollback_checkpoint` 给 Agent。
+兼容垫片：`models/roguelike/prelude.scm` 仍保留旧的 `(checkpoint:save tag)` / `(checkpoint:restore tag)` 函数，但它们只经 `state:all` / `state:replace!` 存取 WorldState 单例的键值、**不含 ECS 实体与 PRNG**，仅供旧模型代码平滑过渡，新代码与 Agent 评测一律使用宿主检查点工具。
 
-### 4.1 预置的 Scheme 游戏开发与调试工具 (`scripts/main.scm`)
+### 4.1 预置的 Scheme 游戏开发与调试工具 (`models/roguelike/main.scm`)
 
-`scripts/main.scm` 默认通过 `(mcp:def-tool ...)` 注册了 4 个高频工具：
+示例模型 `main.scm` 默认通过 `(mcp:def-tool ...)` 注册了 4 个高频工具：
 
 | 工具名称 | 参数 (`arguments`) | 功能说明 |
 | :--- | :--- | :--- |
 | `get_world_summary` | `{}` | 返回 `tick_count`、`target_fps`、所有玩家摘要（坐标、HP、金币、在线状态）与所有存活怪物列表（自动剔除庞大的 `chunks` 原始瓦片数据） |
 | `get_viewport` | `{ "player_id"?: 1 }` | 返回指定玩家的坐标 (`x`, `y`)、视口尺寸 (`cols`, `rows`)、去除 ANSI 后的纯文本 `ascii_screen` 画面以及完整 `hud` 数据 |
 | `teleport_player` | `{ "player_id"?: 1, "x": 5, "y": -3 }` | 将指定玩家瞬移至 `(x, y)`，向其 HUD 日志推送 `[mcp] AI 将你传送至 (x, y)`，并触发画面刷新 |
-| `spawn_monster` | `{ "id": "boss_1", "name": "炎魔", "glyph": "B", "x": 4, "y": 2, "hp"?: 120, "attack"?: 18 }` | 在 `(x, y)` 处动态生成新怪物，写入 `*world-state*["monsters"]` 与 `'actor` 图层，并向全服玩家广播警告日志 |
+| `spawn_monster` | `{ "id": "boss_1", "name": "炎魔", "glyph": "B", "x": 4, "y": 2, "hp"?: 120, "attack"?: 18 }` | 在 `(x, y)` 处动态生成新怪物，经 `state:*` 门面写入单例的 `"monsters"` 键与 `'actor` 图层，并向全服玩家广播警告日志 |
 
 ### 4.2 如何用 `(mcp:def-tool ...)` 动态开发新的 MCP 工具
 
-`scripts/prelude.scm` 提供了极简的声明式注册函数：
+模型 `prelude.scm` 提供了极简的声明式注册函数：
 
 ```scheme
 (mcp:def-tool name description input-schema-hash handler-proc)
@@ -456,9 +501,9 @@ Scheme 脚本利用通用存储原语，将快照写入专用 MCP 存储的 `"ch
 - `input-schema-hash`：符合 JSON Schema 规范的 Scheme `hash`（如 `(hash "type" "object" "properties" ...)`）。
 - `handler-proc`：接收单参数 `args`（由调用方的 `arguments` JSON 对象自动转换而来的 Scheme `hash`），返回任意可序列化为 JSON 的 Scheme 数据结构（推荐返回 `hash`）。
 
-#### 实战示例：在 `scripts/main.scm` 中新增「矩形造墙工具」
+#### 实战示例：在 `models/roguelike/main.scm` 中新增「矩形造墙工具」
 
-只需在 `scripts/main.scm` 末尾追加以下代码并保存（开启 `-w` 时 2 秒内自动生效，或调用 `reload_scripts` 立即生效）：
+只需在模型 `main.scm` 末尾追加以下代码并保存（开启 `-w` 时 2 秒内自动生效，或调用 `reload_scripts` 立即生效）：
 
 ```scheme
 (mcp:def-tool
@@ -511,3 +556,38 @@ AI 甚至无需修改磁盘文件，直接通过 `game_command` 发送 `! (mcp:d
 }
 ```
 随后调用 `tools/list` 即可发现 `gift_gold`，并通过 `tools/call` 直接使用！
+
+---
+
+## 五、 eval 评测模式（`--eval`）：开发能力在评测期冻结
+
+服务端有两种运行模式。**dev 模式**（默认）保留全部 v5.0 开发面：`!` REPL 在线求值、`ecs_modify` 直接改实体、`reload_scripts` 热重载、运行期 `(mcp:def-tool ...)` 注册新工具、同 VM 的 Scheme 断言——开发期它们是效率工具。**eval 模式**专为可信评测：以 `--eval` 启动后常驻开启门禁，`run_epoch` 执行期间也会临时开启同一套门禁。门禁只在两处生效，dev 模式行为零改动：
+
+### 5.1 MCP 分发层门禁（`src/runtime.rs` 的 `eval_block_reason`，全工具一处拦截）
+
+| 调用 | eval 下结果 |
+| :--- | :--- |
+| `ecs_modify` | 拒绝 |
+| `reload_scripts` | 拒绝 |
+| `create_checkpoint` / `rollback_checkpoint` | 拒绝（只许 `run_epoch` 内部使用快照） |
+| `eval_assertion` / `assert_state` | 拒绝（断言改走 `run_epoch` 宿主侧求值） |
+| `game_command` 且命令以 `!` 开头 | 拒绝（普通游戏命令放行） |
+| `ecs_inspect` 带 `modify` 补丁 | 拒绝（等价于 `ecs_modify` 的后门）；纯内省放行 |
+| Scheme 动态工具 | 冻结到门禁开启瞬间已注册的集合（allowlist）；之后运行期新注册的在 eval 下不可见、不可调用 |
+| 其余只读/推进工具（`query_state`、`state_diff`、`state_hash`、`sim_step`、`player_input` 等） | 放行 |
+
+### 5.2 Steel 语言层门禁（`src/logic/mod.rs` 的 `set_eval_language_gate`）
+
+工具层冻结挡不住模型代码自己在 VM 里取墙钟/系统熵，因此 eval 下还会把 Steel 标准库中的非确定性设施替换为报错桩（含 `#%prim.` 拼写），并同步替换模块注册表项，防止用 `(require-builtin ...)` 把原函数重新引入：
+
+- `steel/time`：全部时间函数（墙钟）；
+- `steel/random`：OS 熵随机（与宿主已种子化的 `engine:random-int` 无关，后者照常可用）；
+- `steel/meta`：环境变量读写、宿主指纹，以及 `eval` / `Engine::new` 等代码加载逃逸口；
+- `steel/filesystem`、`steel/ports` / `steel/io`：任意文件与标准输入输出读写；
+- `steel/process`：子进程。
+
+门禁关闭（epoch 结束且非常驻 eval）时原绑定完整恢复。当前仓库内模型脚本均未使用上述被禁设施（已 grep 核查），门禁对它们透明。
+
+### 5.3 确定性边界
+
+eval 与 `run_epoch` 的可复现保证只覆盖无头路径：epoch 以固定 `dt` 步进、PRNG 为宿主自持 xoshiro256++（状态进快照）。live 实时循环的 `dt` 仍取墙钟流逝时间，其确定性不受保证（见 `docs/project/known_limitations.md` (c)）。

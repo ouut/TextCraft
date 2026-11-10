@@ -1,4 +1,4 @@
-# 状态清单（State Inventory）· TextCraft v5.0 基线
+# 状态清单（State Inventory）· TextCraft 基座（feat/simulator-upgrade）
 
 > **范围裁定后的读法（2026-11-10）**：基座状态以**宿主状态**为准——Flecs 世界（`EcsWorld`）、PRNG 状态、宿主计数与配置（第 2 节中所有者为宿主的条目及第 4 节）。**第二轮改造（2026-11-10）起双存储已消灭**：原肉鸽 `*world-state*` 的全部键（chunks/players/monsters/timers 等）迁入宿主管理的单例实体 `WorldState` 的 `DynamicProps`，成为 Flecs 世界的一部分，随 `ecs_world.entities[]` 进出快照 v3；它们仍是**示例模型 `models/roguelike/` 的模型状态，非基座状态**，基座只提供单例承载与 `state:*` 门面原语，不理解其 schema。快照 v3 的 checkpoint 由 Rust 宿主实现（`SchemeLogic::create_checkpoint/rollback_checkpoint` 与同名 MCP 工具），不再由模型脚本承担。
 
@@ -20,15 +20,15 @@
 
 ## 2. 因果状态（必须进快照 v3）
 
-快照 v3 顶层形状：`{version: 3, ecs_world, prng, tick}`——不再有独立的 `world_state` 段；v2 存档可兼容读取（其 `world_state` 段在导入时灌入 WorldState 单例），写出永远是 v3。
+快照 v3 顶层形状：`{format: "textcraft-snapshot", version: 3, model: {name, state_schema, scripts_hash}, tick, prng: {algo, state}, ecs_world}`（`src/logic/mod.rs` 的 `export_snapshot`）——不再有独立的 `world_state` 段；v2 存档可兼容读取（其 `world_state` 段在导入时灌入 WorldState 单例），写出永远是 v3。
 
 | # | 状态 | 所有者 | 物理位置 | 写入口 | 快照字段 |
 |---|---|---|---|---|---|
 | 1 | 原 `*world-state*` 全部顶层键：`tick_count`、`elapsed_sec`、`target_fps`、`idle_timer`、`players`、`saved_players`、`monsters`、`timers`，及按 chunk 分键的地图 `chunk:<cx>,<cy>`（旧单键 `chunks` 由 prelude 首触时无损拆分迁移） | 模型 | WorldState 单例实体（`SchemeLogic::new` 急切创建，id 固定 518）的 `DynamicProps` | 脚本经 `state:get`/`state:set!` 等门面原语（`src/logic/ecs_ffi.rs`）更新 | `ecs_world.entities[]`（单例实体条目的 `dynamic_props`） |
 | 2 | Flecs 全部实体：`GridPos`、`VisualGlyph`、`PlayerSession`、`DynamicProps` 四个组件 | 宿主（世界容器）＋模型（内容） | `src/ecs/world.rs` 的 `EcsWorld.world` | `ecs:*` FFI（`src/logic/ecs_ffi.rs`）、`EcsWorld` 方法 | `ecs_world.entities[]` |
 | 3 | 实体标签：`Monster`、`Player`、`Item`、`Terrain`、`Dead`、`Liquid`、`Burning` | 同上 | `src/ecs/components.rs`，Flecs tag | `ecs:*` FFI | `ecs_world.entities[].tags` |
-| 4 | 实体关系：`PartOf`、`EquippedOn`、`CoveredWith`（关系对） | 同上 | `src/ecs/components.rs`，Flecs relationship | `ecs:*` FFI（`relate!` 等） | `ecs_world.entities[].relations` |
-| 5 | PRNG 内部状态 | 宿主 | `src/logic/mod.rs` 的 `SchemeLogic.rng`（现状 `Option<StdRng>`，第 3 项换自持算法） | `engine:raw-random-int`、`engine:random-int`、`(random:seed!)`、`set_random_seed` | `prng` |
+| 4 | 实体关系：`PartOf`、`EquippedOn`、`CoveredWith`（关系对；宿主另接受任意关系名，见 market_sim 的 `Owns` 等） | 同上 | `src/ecs/components.rs`，Flecs relationship | `ecs:*` FFI（`ecs:relate`/`ecs:unrelate`，prelude 语法糖 `relate!`/`part-of` 等） | `ecs_world.entities[].relations` |
+| 5 | PRNG 内部状态 | 宿主 | `src/logic/mod.rs` 的 `SchemeLogic.prng`（`Arc<Mutex<prng::Prng>>`，自持 xoshiro256++，`src/logic/prng.rs`；第 3 项落地，StdRng 与 `thread_rng` 已清零） | `engine:raw-random-int`、`engine:random-int`、`(random:seed!)`、`set_random_seed` | `prng` |
 | 6 | 权威模拟时钟 `tick_count` | 模型 | 同第 1 项中的键（WorldState 单例内，单列以便裁定，见第 1 节） | `engine:on-tick` 经 `state:set!` | `tick`（从单例读出，顶层单列供宿主使用） |
 
 注：第 2–4 项的单实体序列化形状复用 `EcsWorld::inspect_entity` 的现有输出（实际键名 `position`/`glyph{char,fg,bg,solid,opaque}`/`dynamic_props`/`player_session`/`tags`/`relationships[{relation,target_id,target_name}]`），不另发明格式。
@@ -51,7 +51,7 @@
 
 | 状态 | 物理位置 | 不进快照的理由 |
 |---|---|---|
-| MCP 黑板 `mcp_storage` | `src/types.rs` 的 `McpStorage`（宿主与 `SchemeLogic` 各持一份 `Arc` 引用，同一存储） | Agent 的记忆，不是世界状态；恢复快照不得回滚它。注意：现有 v1 checkpoint 借它作存储介质，不改变其性质 |
+| MCP 黑板 `mcp_storage` | `src/types.rs` 的 `McpStorage`（宿主与 `SchemeLogic` 各持一份 `Arc` 引用，同一存储） | Agent 的记忆，不是世界状态；恢复快照不得回滚它。注意：宿主快照 v3 的 checkpoint 借它作存储介质（键 `checkpoint:<tag>`），不改变其性质 |
 | MCP 动态工具注册表 `*mcp-tools-meta*` / `*mcp-tools-handlers*` | `models/roguelike/prelude.scm` | 属于模型 θ（脚本装载时注册），不属于运行状态；换模型靠重装脚本，不靠快照 |
 | `*mutation-registry*` | `models/roguelike/mutation.scm` | 静态定义数据（变异定义表），装载期由脚本填充，属 θ |
 | `*chunk-size*`、`*esc*`、`*ansi-reset*`、各 `LAYER-*` 常量 | `models/roguelike/prelude.scm` | 常量，属 θ |

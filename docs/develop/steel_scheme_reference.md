@@ -2,7 +2,9 @@
 
 > **文档来源**：基于 [steel-core 0.8.3](https://github.com/mattwparas/steel) 源码全量解析整理。
 
-> **运行环境**：TextCraft 3.0 嵌入式 Steel VM 运行时。涵盖所有全局可用的原语（Primitives）、标准库宏、内置语法与标准模块。
+> **运行环境**：TextCraft（当前分支 feat/simulator-upgrade，crate 5.0.0）嵌入的 Steel VM 运行时，steel-core 版本与 `Cargo.toml` 锁定一致（0.8.3）。涵盖所有全局可用的原语（Primitives）、标准库宏、内置语法与标准模块。
+>
+> **项目绑定提示（非语言内容）**：本项目宿主另行注册了 `ecs:*` / `state:*` / `engine:*` 原语（不在本手册范围，见 `scheme_developer_guide.md` 第 2 节）。另注意评测模式（`--eval` / `run_epoch`）下，宿主会把 `steel/time`、`steel/random`、`steel/meta`、`steel/filesystem`、`steel/ports`、`steel/process` 中的非确定性设施替换为报错桩（含模块注册表），dev 模式不受影响（见 `mcp_developer_guide.md` 第五节）；游戏逻辑请勿依赖这些设施，随机用 `(engine:random-int ...)`、时间用模型 `tick_count`。
 
 
 ## 模块导航目录
@@ -2542,7 +2544,7 @@ Swaps the value of the specified indices in a mutable vector.
 
 ## 哈希表库 (Hash Maps)
 
-提供不可变持久化哈希字典，支持 hash、hash-insert、hash-get、hash-remove、hash-contains?、hash-keys 等，是 TextCraft 世界状态的核心载体。
+提供不可变持久化哈希字典，支持 hash、hash-insert、hash-get、hash-remove、hash-contains?、hash-keys 等。在 TextCraft 中它是脚本层构造状态值的常用数据形状；状态的权威存储是 Flecs ECS（实体组件与 WorldState 单例），经 `state:*` / `ecs:*` 门面读写（见 `scheme_developer_guide.md` 2.12）。
 
 ### `(hash->list ...)`
 
@@ -5792,3 +5794,6 @@ JSON/数据序列化模块：支持结构体与 Steel 原生值到 JSON/二进�
    (require "prelude.scm")
    (require "task1_input.scm")
    ```
+
+4. **评测确定性（TextCraft 项目约束）**：
+   `steel/time`、`steel/random`、`steel/meta`、`steel/filesystem`、`steel/ports`、`steel/process` 在 `--eval` / `run_epoch` 期间被宿主门禁（见文件头提示），模型代码中使用这些模块的逻辑在评测时会直接报错；需要随机与时间语义时改用宿主原语 `(engine:random-int ...)` 与模型自维护的 `tick_count`。

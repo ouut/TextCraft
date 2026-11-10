@@ -1,9 +1,11 @@
 # TextCraft 5.0: Scheme 游戏逻辑与 Rust-Scheme 交互接口完全开发指南
 
+> **当前分支状态（feat/simulator-upgrade，2026-11-10 基座改造后）**：模型脚本位于模型目录（`--scripts-dir`，默认 `models/roguelike/`，不再是 `scripts/`）；模型状态的唯一权威是 Flecs ECS——原 `*world-state*` 已消灭，其键迁入宿主单例实体 `WorldState`，脚本一律经 `state:*` 门面原语读写（见 2.12）；快照为宿主实现的 v3 格式；评测走 `run_epoch`＋宿主侧断言，`--eval` 模式会冻结写类工具与 Steel 非确定性设施（见 `mcp_developer_guide.md` 第五节）。
+
 > [!IMPORTANT]
 > **致阅读本指南的 AI Agent 与开发者**：
 > TextCraft 5.0 采用了 **“Flecs ECS 权威状态底座 (Rust) + 通用密集数学算子 (Rust) + ANSI 零拷贝光栅化 (Rust) + Agent 自动驾驶记忆黑板 (Rust) + 动态涌现规则与玩法系统 (Steel Scheme)”** 的双引擎架构。
-> 本文档专门面向编写 Scheme 脚本（`scripts/*.scm`）的 AI 智能体与游戏逻辑开发者，详尽拆解 Rust 宿主与 Scheme 虚拟机之间的**双向通信契约、所有 FFI 原语、DSL 宏封装、数据类型映射、生命周期钩子、Qud 涌现设计模式与 MCP 调试实践**。
+> 本文档专门面向编写模型脚本（模型目录下的 `*.scm`）的 AI 智能体与游戏逻辑开发者，详尽拆解 Rust 宿主与 Scheme 虚拟机之间的**双向通信契约、所有 FFI 原语、DSL 宏封装、数据类型映射、生命周期钩子、Qud 涌现设计模式与 MCP 调试实践**。
 
 ---
 
@@ -29,7 +31,7 @@
   - [3.3 玩家交互与指令管道钩子](#33-玩家交互与指令管道钩子)
   - [3.4 快照渲染与原生光栅化钩子](#34-快照渲染与原生光栅化钩子)
   - [3.5 存档持久化与 MCP 动态工具自举钩子](#35-存档持久化与-mcp-动态工具自举钩子)
-- [4. `scripts/prelude.scm` 核心语法糖与宏生态](#4-scriptspreludescm-核心语法糖与宏生态)
+- [4. `models/roguelike/prelude.scm` 核心语法糖与宏生态](#4-modelsroguelikepreludescm-核心语法糖与宏生态)
   - [4.1 声明式实体构建宏 (`define-entity`, `spawn-entity`)](#41-声明式实体构建宏-define-entity-spawn-entity)
   - [4.2 标签与关系语法糖 (`with-tag`, `relate!`, `part-of`, `equipped-on`)](#42-标签与关系语法糖-with-tag-relate-part-of-equipped-on)
   - [4.3 地图分块兼容层与自动 ECS 同步](#43-地图分块兼容层与自动-ecs-同步)
@@ -55,6 +57,8 @@
 - **Rust 宿主提供 Flecs ECS 权威底座**：实体（Entity）、组件（Component）、标签（Tag）、关系对（Pair）、空间哈希索引（`SpatialGrid`）以及原生 ANSI RLE 光栅化器（`ViewportRasterizer`）常驻 Rust 内存，天然具备缓存局部性与内存连续性。
 - **Steel Scheme 拥有 100% 规则解释权**：所有游戏机制、AI 索敌、变异能力、热力学相变、装备计算全权用 Scheme 动态编写。Scheme 脚本通过细粒度 FFI 函数直接修改 Flecs 状态。
 
+在当前分支（feat/simulator-upgrade，2026-11-10）中，状态权威进一步收口：4.0/5.0 时期与 ECS 并存的 Scheme 侧 `*world-state*` 状态树已被消灭，其全部键迁入 ECS 内的宿主单例实体 `WorldState`，脚本改经 `state:*` 门面原语读写（见 2.12）；自此**全部因果状态只有一个家**，宿主快照 v3 只需序列化 Flecs 世界＋PRNG＋tick。
+
 ```mermaid
 flowchart LR
     subgraph Rust["Rust 高性能宿主底座"]
@@ -73,7 +77,7 @@ flowchart LR
         Hooks["engine:* 钩子调度与看门狗"]
     end
 
-    subgraph Scheme["Steel Scheme 动态业务系统 (scripts/)"]
+    subgraph Scheme["Steel Scheme 动态业务系统 (models/roguelike/)"]
         direction TB
         Anatomy["anatomy.scm<br>解剖学肢体树 / 装备挂载 / 暴击断肢"]
         Chemistry["chemistry.scm<br>液体池 / 热力学燃烧 / 遇水灭火蒸发"]
@@ -98,10 +102,11 @@ flowchart LR
 ### 1.3 脚本加载链与零状态拷贝热重载
 
 #### 自动加载序列
-当服务端启动或触发热重载时，`src/logic/mod.rs` 会扫描 `scripts/` 目录下所有 `.scm` 文件，并自动执行依赖排序：
-1. **`scripts/prelude.scm` 最先加载**：注入图层常量、宏展开规则（`define-entity`、`spawn-entity`）、关系语法糖；
+当服务端启动或触发热重载时，`src/logic/mod.rs` 会扫描模型目录（`--scripts-dir`，默认 `models/roguelike/`）下所有 `.scm` 文件，并自动执行依赖排序：
+1. **`prelude.scm` 最先加载**：注入图层常量、宏展开规则（`define-entity`、`spawn-entity`）、关系语法糖；
 2. **中间模块按字母序加载**：`anatomy.scm` -> `chemistry.scm` -> `mutation.scm` -> `worldgen.scm` ... 确保各涌现子系统定义在主逻辑前就绪；
-3. **`scripts/main.scm` 最后加载**：挂载标准生命周期钩子并执行 `(engine:on-init)`。
+3. **`main.scm` 最后加载**：挂载标准生命周期钩子并执行 `(engine:on-init)`。
+模型目录还应包含 `model.json` manifest（`name` / `state_schema` / `default_seed` / `assertions`），宿主在装载与快照导入时据此校验模型身份与状态版本，错配会显式拒绝。
 
 #### 零状态拷贝热重载 (Zero-State-Copy Hot Reload)
 在开发过程中启动服务端添加 `-w` / `--watch` 标志（或通过 MCP 调用 `reload_scripts`）：
@@ -109,7 +114,7 @@ flowchart LR
 cargo run -- -w --mcp-port 8082
 ```
 修改任意 `.scm` 文件后，Rust 宿主在 2 秒内自动检测并重新编译整个脚本环境。
-**核心优势**：实体数据全部保存在 Flecs ECS 权威底座中，热重载只刷新函数的逻辑实现，**不会造成世界实体丢失或状态重置**，真正实现亚秒级免编译热更！
+**核心优势**：全部因果状态都保存在 Flecs ECS 权威底座中（实体数据在各实体组件里，模型键值状态在 `WorldState` 单例里），热重载只刷新函数的逻辑实现，**不会造成世界实体丢失或状态重置**，真正实现亚秒级免编译热更！`reload_scripts` 的 `clean: false` 另经 `(engine:export-state)` / `(engine:import-state)` 把单例状态显式备份/恢复一遍；`clean: true` 才是清空世界重新 `(engine:on-init)`。
 
 ---
 
@@ -150,8 +155,7 @@ TextCraft 采用标准的 4 图层空间坐标体系：
 | :--- | :--- | :--- |
 | `(ecs:set-pos eid x y layer)` | 设置或更新实体的世界网格坐标与图层 | 布尔值 `#t` / `#f` |
 | `(ecs:get-pos eid)` | 查询实体坐标 | 返回 `(list x y layer)` 或 `#f` |
-| `(ecs:spawn-at x y layer glyph fg bg name)` | 便捷原语：在指定位置生成实体并设置图元 | 整数 `eid` |
-| `(ecs:at x y)` | 查询坐标 `(x, y)` 上的所有实体 ID（按图层升序排列） | 实体 ID 列表 |
+| `(ecs:at x y)` / `(ecs:at x y layer)` | 查询坐标 `(x, y)` 上的所有实体 ID（带 layer 时限定图层；按图层升序排列） | 实体 ID 列表 |
 | `(ecs:at-layer x y layer)` | 查询坐标 `(x, y)` 在特定图层上的实体 ID | 实体 ID 列表 |
 
 ```scheme
@@ -365,6 +369,29 @@ TextCraft 4.0 充分利用了 Flecs 原生的 Entity-Entity 关系对功能（`R
 (player:key-hold-ticks pid key)                ;; 已持续按住的 tick 数
 ```
 
+### 2.12 模型状态门面 (`state:*`) 与 WorldState 单例 —— 唯一的键值状态家
+
+基座改造（第二轮）后，模型的键值型状态不再存放在 Scheme 全局变量中：宿主在 `SchemeLogic::new` 时急切创建单例实体 `WorldState`（Flecs 首个 spawn，实体 id 固定 518），每个顶层状态键 = 该实体 `DynamicProps` 上的一个键。脚本一律经以下门面原语读写（`src/logic/ecs_ffi.rs` 注册）：
+
+| 函数签名 | 说明 | 返回值 |
+| :--- | :--- | :--- |
+| `(state:get key)` / `(state:get key default)` | 读键；不存在返回 `#f` 或 `default` | 值或默认值 |
+| `(state:set! key value)` | 写键（`key` 为字符串，`value` 为可序列化纯数据） | 布尔值 |
+| `(state:has? key)` | 键是否存在 | 布尔值 |
+| `(state:remove! key)` | 删键 | 布尔值 |
+| `(state:all)` | 全部键值组成的哈希表（`(engine:export-state)` 即返回它） | 哈希表 |
+| `(state:replace! hash)` | 整表替换全部键（读档/热重载恢复用） | 布尔值 |
+| `(state:seed-defaults! hash)` | 只填缺失键（装载期播种；热重载重编译不会抹掉已有状态，clean 重置路径会先清空单例再播种） | 布尔值 |
+| `(state:keys)` | 全部键名列表 | 列表 |
+| `(state:entity-id)` | 单例实体 id（518） | 整数 |
+
+要点：
+- **单一权威**：单例与普通实体同在 Flecs 世界里，快照 v3、状态哈希、宿主断言的路径投影（如 `players.1.hp`、`tick_count`）都以它为准；旧写法 `(set! *world-state* ...)` 已废弃，仓库内模型已全部迁移（直接读写为零）。
+- **权威时钟**：`tick_count` 就是单例里的一个普通键，由模型的 `(engine:on-tick)` 每步 `state:set!` 递增；快照顶层 `tick` 从它读出。
+- **保型规则**：值按 JSON 语义往返——整数、浮点（`0.0` 回来仍是浮点）、布尔、字符串、嵌套 hash/list 全部保型；char/symbol 会降为 string（与 `ecs:set` 同口径）；**闭包与不可序列化值禁止入内**。
+- **大值成本**：读一个大键（如整块 chunk）要付一次 JSON 克隆＋类型转换，热路径上应按 chunk 等粒度分键、避免整表 `(state:all)` 高频调用（现状与余量见 `docs/project/known_limitations.md` (a) 遗留子项）。
+- **按实体建模优先**：键值单例适合全局表与账本类状态；实体性状态应直接用 `ecs:*` 组件/关系建模（非网格实证见 `tests/fixtures/models/market_sim/`，它全程不用单例存业务状态）。
+
 ---
 
 ## 3. Scheme -> Rust 导出的标准生命周期钩子 (Lifecycle Hooks)
@@ -445,16 +472,16 @@ Rust 宿主在主循环中会安全调用 Scheme 预留的标准钩子函数。�
 
 ### 3.5 存档持久化与 MCP 动态工具自举钩子
 
-- `(engine:export-state)`：返回全服待持久化的纯数据字典（供 `--save-file` 自动存档）；
-- `(engine:import-state data)`：恢复磁盘存档；
-- `(mcp:list-tools)`：返回动态注册的 MCP 工具声明列表；
-- `(mcp:call-tool name args)`：执行动态 MCP 工具。
+- `(engine:export-state)`：返回全服待持久化的纯数据字典（供 `--save-file` 自动存档）；已迁移模型实现为 `(state:all)`，未定义的模型由宿主直接读 WorldState 单例；
+- `(engine:import-state data)`：恢复磁盘存档；已迁移模型实现为 `(state:replace! data)` 整表恢复单例；
+- `(engine:mcp-tools)`：返回动态注册的 MCP 工具声明列表；
+- `(engine:on-mcp-call name args)`：执行动态 MCP 工具。
 
 ---
 
-## 4. `scripts/prelude.scm` 核心语法糖与宏生态
+## 4. `models/roguelike/prelude.scm` 核心语法糖与宏生态
 
-`scripts/prelude.scm` 提供了大量极具表现力的宏与语法糖，让实体定义与拓扑关系如同声明配置文件一样简洁：
+模型 `prelude.scm` 提供了大量极具表现力的宏与语法糖，让实体定义与拓扑关系如同声明配置文件一样简洁：
 
 ### 4.1 声明式实体构建宏 (`define-entity`, `spawn-entity`)
 
@@ -495,18 +522,19 @@ Rust 宿主在主循环中会安全调用 Scheme 预留的标准钩子函数。�
 (parts-of body)                    ;; => 列出 body 上的所有肢体
 ```
 
-### 4.3 地图分块兼容层与自动 ECS 同步
+### 4.3 地图分块层：瓦片存单例分键，ECS 实体同步供查询与渲染
 
-为了向后兼容 3.0 的分块地图代码，`scripts/prelude.scm` 的传统接口已**全面桥接并实时同步至 Flecs ECS**：
-- `(world:set-tile x y layer tile-map)`：自动在对应的图层生成/更新 Flecs 实体，并注入 `Solid`、`Terrain`、`Monster` 等标签；
-- `(world:remove-tile x y layer)`：自动调用 `(ecs:despawn ...)` 移除该格实体；
-- `(world:clear!)`：不仅清空字典，同时执行 `(ecs:clear!)` 彻底重置物理世界。
+`models/roguelike/prelude.scm` 的地图接口以 WorldState 单例为数据家、ECS 实体为空间表示，两者同属 Flecs 世界、同一份快照：
+- 瓦片数据按 chunk 分键存入单例：键 `"chunk:<cx>,<cy>"` → `(hash "tiles" (hash "x,y,layer" tile))`，经 `state:get` / `state:set!` 读写（旧单键 `"chunks"` 由 prelude 首触时无损拆分迁入）；
+- `(world:set-tile x y layer tile-map)`：写入对应 chunk 键，并同步在对应图层生成/更新 Flecs 实体（位置、图元与标签），供 `ecs:at` 空间查询与原生光栅化使用；
+- `(world:remove-tile x y layer)`：从 chunk 键移除瓦片，并同步 `(ecs:despawn ...)` 该格实体；
+- `(world:clear!)`：清空全部 chunk 键与怪物列表，并执行 `(ecs:clear!)` 重置物理世界（宿主保证 `ecs:clear!` 保留 WorldState 单例本身）。
 
 ---
 
 ## 5. 类《Caves of Qud》深度涌现机制开发范式
 
-TextCraft 4.0 的 `scripts/` 目录中已经包含了四大类 Qud 深度机制实现，是开发新玩法的最佳范式模板：
+示例模型 `models/roguelike/` 中已经包含了四大类 Qud 深度机制实现，是开发新玩法的最佳范式模板：
 
 ### 5.1 解剖学多肢体系统 (`anatomy.scm`)
 
@@ -620,7 +648,7 @@ TextCraft 4.0 原生集成了 **Model Context Protocol (MCP)** JSON-RPC 2.0 管�
 
 ### 6.2 在线 REPL (`!`) 交互调试技巧
 
-通过 `game_command` 工具或游戏内聊天框输入 `!` 开头的表达式，可直接让 Scheme VM 求值并返回结果：
+通过 `game_command` 工具或游戏内聊天框输入 `!` 开头的表达式，可直接让 Scheme VM 求值并返回结果（仅 dev 模式；`--eval` 模式与 `run_epoch` 期间 `!` REPL 被门禁拒绝，`ecs_modify` 等写类工具同理，见 `mcp_developer_guide.md` 第五节）：
 ```text
 ! (ecs:fov 0 0 10)
 ! (chemistry:ignite 2 0)
@@ -648,8 +676,8 @@ TextCraft 4.0 原生集成了 **Model Context Protocol (MCP)** JSON-RPC 2.0 管�
    ```scheme
    (let ((half-w (quotient cols 2))) ...)
    ```
-4. **禁止在全局 `*world-state*` 存储闭包函数**：
-   磁盘存档序列化只支持纯数据。逻辑回调请放在注册表中通过字符串 ID 检索。
+4. **禁止往 WorldState 单例（`state:set!`）或实体 props（`ecs:set`）里存闭包函数**：
+   快照序列化只支持纯数据（且 char/symbol 会降为 string）。逻辑回调请放在注册表中通过字符串 ID 检索。状态读写一律走 `state:*` 门面，不要再定义自己的全局状态变量——那会绕开快照与状态哈希，制造第二份权威。
 5. **修改画面后调用 `(bump-visual-version!)`**：
    若通过原生 Scheme 字典修改了影响画面的自定义数据，调用 `(bump-visual-version!)` 通知 Rust 宿主推送最新快照。
 
@@ -657,7 +685,7 @@ TextCraft 4.0 原生集成了 **Model Context Protocol (MCP)** JSON-RPC 2.0 管�
 
 ## 7. 核心原语 vs 网格原语清单（基座改造指南第 6 项）
 
-基座是通用逻辑模拟器：新模型选型时先只用**核心原语**，需要网格世界时才引入网格原语。非网格模型（如 `tests/fixtures/models/counter_economy/`）只依赖核心原语与生命周期钩子即可完整运行 epoch。
+基座是通用逻辑模拟器：新模型选型时先只用**核心原语**，需要网格世界时才引入网格原语。非网格模型只依赖核心原语与生命周期钩子即可完整运行 epoch，已有两条实证路径：纯门面状态的 `tests/fixtures/models/counter_economy/`，与全 ECS 组件/关系建模的 `tests/fixtures/models/market_sim/`。
 
 ### 7.1 核心原语（通用，与领域无关）
 
@@ -665,7 +693,8 @@ TextCraft 4.0 原生集成了 **Model Context Protocol (MCP)** JSON-RPC 2.0 管�
 |---|---|
 | 生命周期钩子 | `engine:on-init`、`engine:on-tick`、`engine:on-input`、`engine:on-command`、`engine:on-ui-action`、`engine:export-state`、`engine:import-state`、玩家连接钩子 |
 | 随机（确定性） | `engine:random-int`、`engine:raw-random-int`、`(random:seed!)`、`(random:reset!)`（宿主 xoshiro256++，状态进快照，无系统熵） |
-| 快照与评测（宿主） | 快照 v2 导出/导入、MCP 工具 `state_hash`、`run_epoch`、`create_checkpoint`、`rollback_checkpoint`（均为宿主实现，非脚本逻辑） |
+| 模型键值状态（宿主） | `state:get` / `state:set!` / `state:has?` / `state:remove!` / `state:all` / `state:replace!` / `state:seed-defaults!` / `state:keys` / `state:entity-id`（WorldState 单例是模型状态的唯一键值家） |
+| 快照与评测（宿主） | 快照 v3 导出/导入（导入兼容 v2）、MCP 工具 `state_hash`、`run_epoch`、`create_checkpoint`、`rollback_checkpoint`（均为宿主实现，非脚本逻辑） |
 | 日志与消息 | `engine:log`、`engine:send-message`、`engine:broadcast` |
 | MCP 黑板 | `engine:raw-mcp-store-*` 与 `mcp-store:*` 包装（Agent 记忆，非世界状态） |
 | 动态工具（dev 模式） | `(mcp:def-tool ...)`、`engine:mcp-tools`、`engine:on-mcp-call`（eval 模式下冻结，见基座双模式说明） |

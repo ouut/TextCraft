@@ -2,7 +2,7 @@
 
 > 本文件登记基座改造（第 1–8 项）完成后**仍然存在**的结构性限制：不是待办清单里的普通 bug，而是当前架构下靠约定、靠环境或靠上游版本维持的边界。每条按「现状 / 影响 / 触发条件」记录，处理任何一条前先读对应条目与引用文档。
 >
-> 口径来源（2026-11-10 核对）：`docs/project/state_inventory.md`（状态全集与快照 v2 字段）、`docs/project/baseline_v5_test_results.md`（改造后全量 130 个测试、稳定通过 129）、`docs/develop/scheme_developer_guide.md` 第 7 节（核心原语 vs 网格原语清单）、`Cargo.toml` / `Cargo.lock`（flecs_ecs 锁定版本）与 `src/ecs/world.rs`、`src/runtime.rs` 源码。
+> 口径来源（2026-11-10 核对）：`docs/project/state_inventory.md`（状态全集与快照 v3 字段）、`docs/project/baseline_v5_test_results.md`（基线与第 2–8 项改造后的历史结果；第二轮改造后全量口径为 144 个测试、稳定通过 143）、`docs/develop/scheme_developer_guide.md` 第 7 节（核心原语 vs 网格原语清单）、`Cargo.toml` / `Cargo.lock`（flecs_ecs 锁定版本）与 `src/ecs/world.rs`、`src/runtime.rs` 源码。
 
 ---
 
@@ -42,7 +42,7 @@ live 模式下同一局游戏无法按「种子＋输入序列」复现：帧率
 ## (d) 性能测试红灯与时序测试抖动
 
 **现状**
-基线口径（`docs/project/baseline_v5_test_results.md`，改造后结果）：全量 130 个测试稳定通过 129 个。唯一稳定失败是 `phase5_scale_benchmark::test_10000_entities_scale_and_rasterizer_benchmark` 的光栅化性能预算断言（预算 200μs/帧，基线环境慢速共享 VM 实测 697–827μs），属环境问题、非功能回归。此外 `phase5_verification_test` 与 `snapshot_dedup_test` 的多人时序断言在全量高负载下偶发失败（失败集合逐次不同），单独重跑均全过（基线记录 verification 9/9、dedup 4/4）。
+当前口径（第二轮改造后，2026-11-10）：全量 144 个测试稳定通过 143 个（基线变迁见 `docs/project/baseline_v5_test_results.md`：改造前 105/102 → 第 2–8 项后 130/129 → 协同修复轮后 137/134 → 第二轮后 144/143）。唯一稳定失败始终是 `phase5_scale_benchmark::test_10000_entities_scale_and_rasterizer_benchmark` 的光栅化性能预算断言（预算 200μs/帧，基线环境慢速共享 VM 实测 697–827μs），属环境问题、非功能回归。此外 `phase5_verification_test` 与 `snapshot_dedup_test` 的多人时序断言在全量高负载下偶发失败（失败集合逐次不同），单独重跑均全过（基线记录 verification 9/9、dedup 4/4）。另注意：CI 必过清单（`.github/workflows/test.yml`）是协同修复轮时定的 17 套件，第二轮新增的 `snapshot_v3_test` 与 `market_sim_test` 尚未补进该清单（workflow 注释已声明新增套件须手工补入），补入前这两套件只在本地全量中运行。
 
 **影响**
 全量 `cargo test` 在慢速机器上永远有一盏红灯，容易掩盖真正的性能回归，也容易让人养成「红灯不用看」的习惯；时序抖动则会产生与改动无关的偶发红灯。CI 已做区分处理（`.github/workflows/test.yml`）：`phase5_scale_benchmark` 单独一步、`continue-on-error: true` 只记录不挡门禁，其余套件（含时序套件）仍在必过集合内——所以时序偶发红灯在 CI 上仍可能出现，处置方式是先单独重跑该套件确认，而不是直接放行或改断言。
@@ -61,4 +61,4 @@ ECS 绑定 `flecs_ecs` 仍是 Alpha 阶段的 Rust 绑定（`Cargo.lock` 中版�
 升级 flecs_ecs 时，绑定 API、组件/标签的内部命名、实体 id 语义（当前保 id 依赖 `World::make_alive`）都可能变化，而快照层对这些细节是硬编码耦合的：升级即使编译通过，快照往返也可能静默丢标签、丢关系或错位组件。锁 rev 本身也意味着上游修复不会自动流入，每次升级都是一次需要显式评估的事件。
 
 **触发条件**
-任何 flecs_ecs 升级（改 `Cargo.toml` 的 rev 或更新 `Cargo.lock` 中该包）。升级时必须同步复查：`export_world_json` / `import_world_json` / `inspect_entity` 的字段形状、`is_structural_tag` 名单、`make_alive` 保 id 行为，并以 `tests/snapshot_v2_test.rs` 与 ECS 相关套件（`ecs_ffi_test` 等）全过为最低门槛，快照 v2 的存量存档兼容性另行人工核对。
+任何 flecs_ecs 升级（改 `Cargo.toml` 的 rev 或更新 `Cargo.lock` 中该包）。升级时必须同步复查：`export_world_json` / `import_world_json` / `inspect_entity` 的字段形状、`is_structural_tag` 名单、`make_alive` 保 id 行为，并以 `tests/snapshot_v2_test.rs`、`tests/snapshot_v3_test.rs` 与 ECS 相关套件（`ecs_ffi_test` 等）全过为最低门槛；快照 v3 往返与 v2 存量存档的兼容读取另行人工核对。

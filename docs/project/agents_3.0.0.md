@@ -8,6 +8,8 @@
 > - 版本演进日志：[**《版本演进与架构变更日志》**](changelog.md)
 > - 双引擎演进路线图：[**《v4.0/5.0 架构与路线图》**](v4.0_architecture_and_roadmap.md)
 > - MCP AI 协同指南：[**《MCP 开发者与 AI 协同指南》**](../develop/mcp_developer_guide.md)
+>
+> ⚠️ **历史文档标注（2026-11-10）**：本文档对应 **TextCraft 3.0 时期**，正文内容为历史记录、未按后续版本改写。当前分支 `feat/simulator-upgrade`（模拟器基座改造后）的状态以 [`state_inventory.md`](state_inventory.md)（状态全集）、[`known_limitations.md`](known_limitations.md)（现行限制）与 `docs/develop/` 下的三份开发指南为准；版本演进见 [`changelog.md`](changelog.md) 的 feat/simulator-upgrade 条目。
 
 本文档制定了全面推倒重来、彻底剥离 Rust 游戏结构体、构建 **Hybrid UI（`<pre>` 字符流 + HTML 浮动 HUD）**，并支持 **Scheme 动态视口、自定义 HUD 主题与动态 FPS 变频控制** 的工作流与 Agent 任务编排。
 

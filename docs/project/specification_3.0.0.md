@@ -9,6 +9,8 @@
 > - 双引擎演进路线图：[**《v4.0/5.0 架构与路线图》**](v4.0_architecture_and_roadmap.md)
 > - Scheme FFI 开发指南：[**《Scheme 开发者指南》**](../develop/scheme_developer_guide.md)
 > - MCP AI 协同指南：[**《MCP 开发者与 AI 协同指南》**](../develop/mcp_developer_guide.md)
+>
+> ⚠️ **历史文档标注（2026-11-10）**：本文档对应 **TextCraft 3.0 时期**的规范，正文（包括以 Scheme `*world-state*` 为世界状态核心的架构描述）为历史记录、未按后续版本改写。当前分支 `feat/simulator-upgrade`（模拟器基座改造后）的状态以 [`state_inventory.md`](state_inventory.md)（状态全集）、[`known_limitations.md`](known_limitations.md)（现行限制）与 `docs/develop/` 下的三份开发指南为准；版本演进见 [`changelog.md`](changelog.md) 的 feat/simulator-upgrade 条目。
 
 > **核心哲学**：  
 > **1. 游戏语义完全归属 Scheme，Rust 零硬编码结构体（Zero Rust Game Structs）**。  
