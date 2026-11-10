@@ -433,6 +433,9 @@ impl TextCraftServer {
     /// allowlist; registrations after that point are rejected while gated.
     pub fn set_eval_mode(&mut self, on: bool) {
         self.eval_mode = on;
+        // Language-level gate (task 4): permanent eval mode also gates
+        // the Scheme VM itself, not just the MCP dispatch layer.
+        self.logic.set_eval_language_gate(on);
         if on {
             self.capture_eval_allowlist();
         } else if !self.in_epoch {
@@ -526,10 +529,17 @@ impl TextCraftServer {
                 self.capture_eval_allowlist();
             }
         }
+        // Language-level gate (task 4) for the epoch's duration; a
+        // swapped-in model logic is gated inside run_epoch_inner
+        // before its scripts are compiled.
+        self.logic.set_eval_language_gate(true);
         let result = self.run_epoch_inner(args);
         self.in_epoch = was_in_epoch;
         if !self.in_epoch && !self.eval_mode {
             self.eval_dynamic_allowlist = None;
+            // Permanent eval mode keeps the language gate; a bare
+            // epoch in dev mode restores the stock VM afterwards.
+            self.logic.set_eval_language_gate(false);
         }
         result
     }
@@ -541,6 +551,9 @@ impl TextCraftServer {
             if dir_path != self.logic.scripts_dir() {
                 let mut logic = SchemeLogic::new(&dir_path, false, None)
                     .map_err(|e| format!("run_epoch: failed to create logic for {}: {}", dir, e))?;
+                // Gate BEFORE init compiles the model scripts, so a
+                // top-level nondeterministic call fails loudly.
+                logic.set_eval_language_gate(true);
                 logic
                     .init()
                     .map_err(|e| format!("run_epoch: failed to init model {}: {}", dir, e))?;
@@ -676,6 +689,27 @@ impl TextCraftServer {
 
         Ok(serde_json::json!({
             "mode": "eval",
+            // Host fingerprint (task 5): compile-time constants ONLY —
+            // crate version from Cargo.toml [package] version via
+            // env!, flecs_ecs git rev pinned in Cargo.toml /
+            // Cargo.lock, steel-core version from the Cargo.toml
+            // dependency spec. No timestamps or environment-derived
+            // values: the report stays byte-identical across runs,
+            // and the determinism contract (final_state_hash +
+            // assertion results) is unaffected by this metadata.
+            "host": {
+                "crate_version": env!("CARGO_PKG_VERSION"),
+                "flecs_ecs_rev": "bf956db99b69d41ee142c9d52054911af28d7e93",
+                "steel_core_version": "0.8.3",
+            },
+            // dt provenance (task 6): an epoch always steps with the
+            // fixed dt below (arg `dt`, default 0.016). The live
+            // run_loop is NOT covered by this guarantee — see the
+            // wall-clock comment in run_loop.
+            "dt": {
+                "source": "fixed",
+                "value": dt,
+            },
             "scripts_hash": scripts_hash,
             "assertions_hash": assertions_hash,
             "seed": seed,
@@ -2672,6 +2706,14 @@ impl TextCraftServer {
             let now = Instant::now();
             let elapsed = now.duration_since(last_tick_time);
             last_tick_time = now;
+            // DETERMINISM BOUNDARY (task 6): the LIVE loop's dt comes
+            // from the wall clock (elapsed real time x time_scale), so
+            // live play is inherently non-reproducible. The
+            // determinism guarantee covers ONLY the epoch path
+            // (run_epoch), which steps with a fixed dt recorded in
+            // the epoch report as dt.source == "fixed". Do not "fix"
+            // this line to a constant: live play needs real elapsed
+            // time; reproducibility is run_epoch's job.
             let dt = elapsed.as_secs_f32() * self.time_scale;
 
             // Dynamically query target FPS from Scheme (clamped 1~60, default 60)
