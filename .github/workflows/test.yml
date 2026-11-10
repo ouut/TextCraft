@@ -5,11 +5,11 @@ name: Tests
 on:
   push:
     branches:
-      - feat/simulator-upgrade
+      - v6.0
       - v5.0
   pull_request:
     branches:
-      - feat/simulator-upgrade
+      - v6.0
       - v5.0
 
 permissions:
@@ -66,6 +66,7 @@ jobs:
             headless_simulation_test \
             integration_tests \
             manifest_test \
+            market_sim_test \
             mcp_storage_test \
             phase4_emergence_test \
             phase5_verification_test \
@@ -73,7 +74,8 @@ jobs:
             rasterizer_benchmark \
             server_gateway_test \
             snapshot_dedup_test \
-            snapshot_v2_test
+            snapshot_v2_test \
+            snapshot_v3_test
           do
             echo "::group::cargo test --test ${suite}"
             cargo test --locked --no-fail-fast --test "${suite}"
