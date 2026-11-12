@@ -229,27 +229,31 @@ TextCraft 3.0 前端内置 `resolveClientIdentity()`，支持通过 URL 直接�
 
 ---
 
-## 5. Scheme 引擎核心生命周期契约
+## 5. Scheme 引擎核心生命周期契约与 FFI 通信边界
 
-Scheme 主脚本需实现以下标准生命周期函数：
+> [!TIP]
+> 完整的 Rust 宿主与 Scheme 通信边界规范、注入函数、生命周期钩子参数与看门狗机制，请参阅专门文档：[**《Rust 基座与 Scheme 交互通信 API 规范》 (`docs/develop/rust_scheme_ffi_boundary.md`)**](docs/develop/rust_scheme_ffi_boundary.md)。
+
+Scheme 主脚本实现以下标准生命周期与事件钩子函数：
 
 | 函数签名 | 触发时机 | 职责说明 |
 |---|---|---|
 | `(engine:target-fps)` | 每次时钟调度前 | 返回当前目标帧率（1 ~ 60），宿主据此动态调整睡眠节拍 |
 | `(engine:viewport-size pid)` | 视口渲染前 | 返回 `(list cols rows)`，动态定义该玩家当前屏幕行列大小 |
-| `(engine:hud-config)` | 握手与主题同步 | 返回 HUD 主题配置（如 `"theme": "cyberpunk"`） |
 | `(engine:on-init)` | 引擎启动时 | 初始化 `*world-state*` 地图分块、实体与初始数据 |
 | `(engine:on-player-join pid token)` | 玩家建立连接 | 解析 `username:token`，清理同身份旧连接，恢复存档或创建角色并置 `"online" #t` |
 | `(engine:on-player-disconnect pid)` | 玩家断线进入宽限期 | 将玩家 `"online"` 标记为 `#f`（保留内存态但从他人视口与 AI 索敌中隐藏，不删档） |
 | `(engine:on-player-reconnect pid)` | 宽限期内恢复连接 | 将玩家 `"online"` 恢复为 `#t` 并立即重推最新快照（不重复刷欢迎日志） |
 | `(engine:on-player-leave pid)` | 宽限期超时彻底离开 | 归档角色数据至 `"saved_players"` 并从活跃表 `"players"` 物理移除 |
 | `(engine:on-tick dt tick-id)` | 主时钟心跳 | 更新世界演化、怪物巡逻与战斗 AI、状态结算与无操作降频 |
-| `(engine:on-input pid input-map)` | 接收按键/鼠标 | 处理角色位移与交互动作 |
+| `(engine:on-input pid input-map)` | 接收按键/鼠标 | 处理角色位移与交互动作（支持 KeyUp/Hold 物理时序） |
 | `(engine:on-ui-action pid action-map)`| 接收 HUD 交互 | 处理点击背包、对话关闭、视口变更等 UI 交互 |
 | `(engine:on-command pid datum raw)` | 接收控制台指令 | 安全解析玩家聊天或游戏命令 |
 | `(engine:render-snapshot pid)` | 每帧推流前 | Scheme 权威快照生成与脏检测。未变脏返回 `#f`（跳过光栅化），变脏时返回 `(hash "screen" ansi-str "cols" cols "rows" rows "hud" hud-map)` |
 | `(engine:export-state)` | 存档/热重载前 | 将 `*world-state*` 导出为纯 JSON 兼容纯数据树 |
 | `(engine:import-state data)` | 读档/热重载后 | 恢复全局纯数据状态 |
+| `(engine:mcp-tools)` | MCP 工具列表查询 | 返回已注册动态 MCP 工具的清单 |
+| `(engine:on-mcp-call name args)` | MCP 工具执行派发 | 执行具体动态 MCP 工具并返回 JSON 兼容结果 |
 
 ### 宿主注入函数 (Host Functions)
 
@@ -258,9 +262,10 @@ Rust 宿主向 Scheme 运行环境注册了以下通用系统功能：
 - `(engine:broadcast channel text)`：向全服广播事件通知
 - `(engine:log text)`：在服务端输出 tracing 日志
 - `(engine:random-int min max [seed])`：生成范围内的伪随机整数（支持可选种子实现确定性推演）
-- `(mcp:store-set [namespace] key val)`：写入专用 MCP 智能体存储黑板
-- `(mcp:store-get [namespace] key)`：读取专用 MCP 存储项（不存在返回 `#f`）
-- `(mcp:def-tool name desc schema proc)`：动态自举定义新 MCP 工具
+- `(engine:strip-ansi text)`：剥离 ANSI 控制字符
+- `(engine:raw-mcp-store-set! key val ns)` / `(engine:raw-mcp-store-get key ns)`：读写专用 MCP 智能体存储黑板
+- `(engine:raw-mcp-store-list ns)` / `(engine:raw-mcp-store-delete! key ns)`：列举与清理专用 MCP 存储项
+- `(__engine:parse-datum s)`：受控 S 表达式安全语法解析器（纯 Reader，不求值）
 
 ---
 
@@ -281,6 +286,7 @@ textcraft/
   ├── docs/                          # 开发者文档
   │   └── develop/
   │       ├── agent_developer_guide.md
+  │       ├── rust_scheme_ffi_boundary.md
   │       ├── mcp_developer_guide.md
   │       ├── steel_scheme_reference.md
   │       └── steel_scheme_best_practices.md
